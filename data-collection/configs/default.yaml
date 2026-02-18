@@ -1,0 +1,23 @@
+# Default configuration for DF website fingerprinting data collection
+
+data:
+  raw_dir: "data/raw"
+  collected_dir: "data/collected"
+  site_list: "data/collected/site_list.txt"
+  sequence_length: 5000
+
+collection:
+  num_batches: 90
+  page_load_timeout: 60
+  post_load_wait: 5
+  newnym_wait: 10
+  max_retries: 3
+  min_trace_packets: 50
+  tor_browser_path: "/opt/tor-browser"
+
+preprocessing:
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+
+seed: 42
