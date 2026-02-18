@@ -1,0 +1,9 @@
+numpy
+pyyaml
+tqdm
+stem
+selenium
+tbselenium
+dpkt
+gdown
+pytest
