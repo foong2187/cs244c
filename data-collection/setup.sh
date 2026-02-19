@@ -7,14 +7,27 @@ echo "=== [1/6] Updating packages ==="
 apt-get update -q
 apt-get install -y \
     tor \
-    firefox-esr \
     tcpdump \
     python3-pip \
     python3-venv \
     wget \
     curl \
     net-tools \
-    iproute2
+    iproute2 \
+    software-properties-common
+
+# firefox-esr is Debian-only; on Ubuntu 22.04 Firefox ships as a snap which
+# breaks geckodriver. Install the real deb from Mozilla's PPA instead.
+echo "=== [1b/6] Installing Firefox deb from Mozilla PPA ==="
+add-apt-repository -y ppa:mozillateam/ppa
+# Prefer PPA package over the snap stub
+cat > /etc/apt/preferences.d/mozilla-firefox << 'PREF'
+Package: *
+Pin: release o=LP-PPA-mozillateam
+Pin-Priority: 1001
+PREF
+apt-get update -q
+apt-get install -y firefox
 
 echo "=== [2/6] Installing geckodriver ==="
 GECKO_VER="v0.35.0"
