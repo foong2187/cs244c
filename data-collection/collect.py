@@ -36,7 +36,7 @@ TOR_CONTROL_PASS = "cs244c_collection"
 
 PAGE_TIMEOUT     = 60   # seconds to wait for full page load
 POST_LOAD_WAIT   = 5    # seconds after readyState==complete
-NEWNYM_WAIT      = 10   # seconds to wait after requesting new circuit
+NEWNYM_WAIT      = 5    # seconds to wait after requesting new circuit
 MAX_RETRIES      = 3    # retries per (site, instance) before skipping
 
 PCAP_DIR.mkdir(parents=True, exist_ok=True)

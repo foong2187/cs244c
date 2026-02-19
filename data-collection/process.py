@@ -73,11 +73,32 @@ def pcap_to_sequence(pcap_path: Path, guard_ip: str) -> list[int] | None:
     return directions + [0] * (SEQ_LEN - len(directions))
 
 
-def get_guard_ip_from_progress() -> str | None:
+def load_guard_ip_map() -> dict[tuple[int, int], str]:
     """
-    Extract the most common guard IP from progress.csv as a fallback
-    when the guard IP is not embedded in the filename.
+    Build a (site_idx, instance) -> guard_ip map from progress.csv.
+    Each pcap was captured on a specific guard; using the correct one
+    ensures accurate direction filtering even when the guard rotated.
     """
+    guard_map = {}
+    if not PROGRESS_FILE.exists():
+        return guard_map
+    with open(PROGRESS_FILE, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("status") != "ok":
+                continue
+            ip = row.get("guard_ip", "").strip()
+            if not ip:
+                continue
+            try:
+                key = (int(row["site_idx"]), int(row["instance"]))
+                guard_map[key] = ip
+            except (KeyError, ValueError):
+                continue
+    return guard_map
+
+
+def get_fallback_guard_ip() -> str | None:
+    """Return the most common guard IP from progress.csv as a fallback."""
     if not PROGRESS_FILE.exists():
         return None
     from collections import Counter
@@ -102,18 +123,24 @@ def main():
         sys.exit(1)
     log.info(f"Found {len(pcaps)} pcap files")
 
-    guard_ip = get_guard_ip_from_progress()
-    if not guard_ip:
-        guard_ip = input(
+    guard_map = load_guard_ip_map()
+    fallback_guard_ip = get_fallback_guard_ip()
+    if not guard_map and not fallback_guard_ip:
+        fallback_guard_ip = input(
             "Enter Tor guard IP (check collection.log for 'guard IP: ...'): "
         ).strip()
-    log.info(f"Using guard IP: {guard_ip}")
+    if guard_map:
+        log.info(f"Loaded per-pcap guard IPs for {len(guard_map)} traces "
+                 f"({len(set(guard_map.values()))} unique guards)")
+    else:
+        log.info(f"No per-pcap guard map; using fallback IP: {fallback_guard_ip}")
 
     # Filename format: {site_idx:03d}-{instance:03d}.pcap
     by_site: dict[int, list[Path]] = defaultdict(list)
     for p in pcaps:
         try:
-            site_idx = int(p.stem.split("-")[0])
+            parts = p.stem.split("-")
+            site_idx = int(parts[0])
             by_site[site_idx].append(p)
         except ValueError:
             log.warning(f"Skipping unexpected filename: {p.name}")
@@ -125,6 +152,15 @@ def main():
 
     for site_idx in tqdm(sorted(by_site), desc="Processing sites"):
         for pcap_path in by_site[site_idx]:
+            try:
+                instance = int(pcap_path.stem.split("-")[1])
+            except (IndexError, ValueError):
+                instance = -1
+            guard_ip = guard_map.get((site_idx, instance), fallback_guard_ip)
+            if not guard_ip:
+                log.warning(f"  No guard IP for {pcap_path.name}, skipping")
+                skipped += 1
+                continue
             seq = pcap_to_sequence(pcap_path, guard_ip)
             if seq is None:
                 skipped += 1
