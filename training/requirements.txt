@@ -1,0 +1,4 @@
+tensorflow[and-cuda]>=2.13
+numpy
+scikit-learn
+matplotlib
