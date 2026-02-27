@@ -1,0 +1,35 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Preprocessed datasets (multi-GB pickle files)
+dataset/
+*.pkl
+
+# Raw data (GTT23.hdf5 is ~44GB)
+data/GTT23.hdf5
+data/cookies.txt
+data/README.md
+data/ACCESS.md
+data/TERMS.md
+data/download.sh
+data/devin-data/
+
+# TensorFlow / training artifacts
+*.log
+logs/
+saved_models/
+results/
+*.h5
+*.keras
+
+# OS
+.DS_Store
+Thumbs.db

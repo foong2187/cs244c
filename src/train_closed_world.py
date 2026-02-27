@@ -20,6 +20,11 @@ import random
 
 import numpy as np
 import tensorflow as tf
+
+gpus = tf.config.list_physical_devices('GPU')
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
+
 from tensorflow.keras.optimizers import Adamax
 
 from model import DFNet
@@ -107,15 +112,28 @@ def main():
     print("Model compiled")
 
     # ---- Train ----
+    with tf.device('/cpu:0'):
+        train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+        valid_ds = tf.data.Dataset.from_tensor_slices((X_valid, y_valid))
+    del X_train, y_train, X_valid, y_valid
+
+    train_ds = train_ds.shuffle(50000, seed=0) \
+        .batch(args.batch_size) \
+        .prefetch(tf.data.AUTOTUNE)
+    valid_ds = valid_ds.batch(args.batch_size) \
+        .prefetch(tf.data.AUTOTUNE)
+
     history = model.fit(
-        X_train, y_train,
-        batch_size=args.batch_size,
+        train_ds,
         epochs=args.epochs,
         verbose=args.verbose,
-        validation_data=(X_valid, y_valid))
+        validation_data=valid_ds)
 
     # ---- Evaluate ----
-    score_test = model.evaluate(X_test, y_test, verbose=args.verbose)
+    with tf.device('/cpu:0'):
+        test_ds = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+    test_ds = test_ds.batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    score_test = model.evaluate(test_ds, verbose=args.verbose)
     print(f"Testing accuracy: {score_test[1]:.6f}")
 
     # Top-N accuracy (useful for Walkie-Talkie evaluation)

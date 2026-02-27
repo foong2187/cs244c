@@ -2,3 +2,5 @@ tensorflow>=2.10
 numpy
 scikit-learn
 matplotlib
+h5py
+hdf5plugin
