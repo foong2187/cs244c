@@ -178,8 +178,8 @@ def stop_capture(proc: subprocess.Popen):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--instances", type=int, default=90,
-                   help="Number of traces per site (default: 90)")
+    p.add_argument("--instances", type=int, default=200,
+                   help="Number of traces per site (default: 200)")
     p.add_argument("--interface", type=str, default="ens4",
                    help="Network interface for tcpdump (default: ens4). "
                         "Run 'ip route' to find yours.")
