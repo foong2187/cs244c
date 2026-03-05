@@ -1,0 +1,7 @@
+# Extra dependencies for the crawler (client-side trace collection).
+# Install with: pip install -r requirements-crawler.txt
+stem
+selenium
+requests[socks]
+dpkt
+numpy
