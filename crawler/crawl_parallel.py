@@ -33,7 +33,7 @@ BASE_SOCKS_PORT = 9060
 BASE_CONTROL_PORT = 9061
 
 
-def _launch_tor_instance(worker_id, data_dir):
+def _launch_tor_instance(worker_id, data_dir, timeout=120):
     """Launch a Tor process for this worker. Returns (tor_process, socks_port, control_port)."""
     from stem.process import launch_tor_with_config
 
@@ -51,41 +51,69 @@ def _launch_tor_instance(worker_id, data_dir):
             "CookieAuthentication": "0",
             "Log": "notice stdout",
         },
-        timeout=180,
+        timeout=timeout,
         take_ownership=True,
     )
     print(f"[W{worker_id}] Tor ready.")
     return tor_process, socks_port, control_port
 
 
-def _tor_data_dir(worker_id):
-    """Tor DataDirectory under repo so we avoid /tmp full, noexec, or stale locks."""
-    return os.path.join(REPO_ROOT, "data", "tor-crawler-dirs", f"tor-crawler-{worker_id}")
+def _is_tor_dead(exc):
+    """Check if exception indicates Tor control connection died."""
+    s = str(exc).lower()
+    if "connection reset" in s or "socketclosed" in s:
+        return True
+    try:
+        from stem import SocketClosed
+        if isinstance(exc, SocketClosed):
+            return True
+        if hasattr(exc, "__cause__") and exc.__cause__ and isinstance(exc.__cause__, SocketClosed):
+            return True
+    except ImportError:
+        pass
+    return False
 
 
 def _worker_main(worker_id, sites, visits, visit_start, output_dir, pcap_dir,
                  page_timeout, post_load_wait, interface):
     """Entry point for each worker process."""
+    from crawler.crawl import run_crawl
+
     data_dir = _tor_data_dir(worker_id)
     os.makedirs(data_dir, exist_ok=True)
 
+    max_tor_restarts = 5
     tor_proc = None
-    try:
-        tor_proc, socks_port, control_port = _launch_tor_instance(worker_id, data_dir)
 
-        from crawler.crawl import run_crawl
-        run_crawl(
-            sites, socks_port=socks_port, control_port=control_port,
-            output_dir=output_dir, pcap_dir=pcap_dir,
-            visits=visits, visit_start=visit_start,
-            page_timeout=page_timeout,
-            post_load_wait=post_load_wait, interface=interface,
-            worker_id=worker_id,
-        )
-    except Exception as e:
-        print(f"[W{worker_id}] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+    try:
+        for attempt in range(max_tor_restarts):
+            tor_proc = None
+            try:
+                tor_proc, socks_port, control_port = _launch_tor_instance(worker_id, data_dir)
+                run_crawl(
+                    sites, socks_port=socks_port, control_port=control_port,
+                    output_dir=output_dir, pcap_dir=pcap_dir,
+                    visits=visits, visit_start=visit_start,
+                    page_timeout=page_timeout,
+                    post_load_wait=post_load_wait, interface=interface,
+                    worker_id=worker_id,
+                )
+                break
+            except Exception as e:
+                if tor_proc:
+                    try:
+                        tor_proc.kill()
+                    except Exception:
+                        pass
+                    tor_proc = None
+                if _is_tor_dead(e) and attempt < max_tor_restarts - 1:
+                    print(f"[W{worker_id}] Tor died, restarting... ({attempt + 1}/{max_tor_restarts})")
+                    time.sleep(15)
+                    continue
+                print(f"[W{worker_id}] ERROR: {e}")
+                import traceback
+                traceback.print_exc()
+                break
     finally:
         if tor_proc:
             try:
@@ -166,7 +194,7 @@ def main():
         )
         p.start()
         processes.append(p)
-        time.sleep(10)  # stagger Tor launches so bootstrap isn't overloaded
+        time.sleep(5)  # stagger Tor launches to avoid bootstrap overload
 
     for p in processes:
         p.join()
