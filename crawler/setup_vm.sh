@@ -6,7 +6,7 @@
 # Then:  sudo .venv/bin/python -m crawler.crawl_parallel --workers 10 --sites 95 --visits 300
 set -e
 
-GECKO_VER="v0.35.0"
+GECKO_VER="v0.36.0"
 CURRENT_USER="${SUDO_USER:-$USER}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
