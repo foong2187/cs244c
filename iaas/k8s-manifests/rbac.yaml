@@ -1,0 +1,111 @@
+# Namespace for Argo Workflows
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo
+
+---
+
+# Service Account for Argo Workflows
+# ARGO_SA_EMAIL is substituted by deploy.sh from terraform output argo_service_account_email
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow
+  namespace: argo
+  annotations:
+    iam.gke.io/gcp-service-account: wflab-cluster-argo-sa@wflab01.iam.gserviceaccount.com
+
+---
+
+# Service Account for WF Data Collection Jobs
+# ARGO_SA_EMAIL is substituted by deploy.sh from terraform output argo_service_account_email
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wf-data-collector
+  namespace: default
+  annotations:
+    iam.gke.io/gcp-service-account: wflab-cluster-argo-sa@wflab01.iam.gserviceaccount.com
+
+---
+
+# ClusterRole for Argo Workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-workflow-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/status", "configmaps", "events", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows", "workflows/finalizers", "workflowtemplates", "workflowtemplates/finalizers", "cronworkflows", "cronworkflows/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list", "watch"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["create", "get", "delete"]
+
+---
+
+# ClusterRoleBinding for Argo Workflows
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-workflow-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-workflow-role
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow
+  namespace: argo
+
+---
+
+# Role for WF Data Collection Jobs (scoped to default namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wf-data-collector-role
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+
+---
+
+# RoleBinding for WF Data Collection Jobs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wf-data-collector-binding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wf-data-collector-role
+subjects:
+- kind: ServiceAccount
+  name: wf-data-collector
+  namespace: default
+- kind: ServiceAccount
+  name: argo-workflow
+  namespace: argo

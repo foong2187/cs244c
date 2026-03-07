@@ -1,0 +1,254 @@
+# Website Fingerprinting Data Collection Pipeline
+# This workflow orchestrates the complete data collection process:
+# 1. collect.py  – Collect pcap files from Tor traffic  → /app/data/pcap/
+# 2. process.py  – Convert pcaps to direction sequences  → /app/data/pickle/
+# 3. analyze.py  – Exploratory data analysis             → /app/data/analysis/
+# 4. upload      – Push all sub-directories to GCS
+
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: wf-data-collection-pipeline
+  namespace: argo
+spec:
+  entrypoint: wf-pipeline
+  serviceAccountName: argo-workflow
+
+  # Global parameters
+  arguments:
+    parameters:
+    - name: instances
+      value: "1"
+      description: "Number of instances to collect per site"
+    - name: interface
+      value: "eth0"
+      description: "Network interface for packet capture"
+    - name: image
+      value: "gcr.io/wflab01/wf-data-collection:latest"
+      description: "Docker image for data collection"
+    - name: gcs-bucket
+      value: "wflab-storage-wflab01-247b0fef"
+      description: "GCS bucket for data storage"
+
+  # Single persistent volume shared by all steps.
+  # Sub-paths within the volume keep each step's output isolated:
+  #   pcap/       – raw tcpdump captures (written by step 1)
+  #   pickle/     – processed numpy arrays (written by step 2)
+  #   analysis/   – EDA plots (written by step 3)
+  #   logs/       – progress.csv + collection.log (written by step 1)
+  volumes:
+  - name: data-storage
+    persistentVolumeClaim:
+      claimName: data-storage-pvc
+
+  templates:
+
+  # Main pipeline orchestration (sequential DAG)
+  - name: wf-pipeline
+    dag:
+      tasks:
+      - name: cleanup
+        template: cleanup-old-data
+
+      - name: collect-data
+        template: collect-tor-traffic
+        dependencies: [cleanup]
+        arguments:
+          parameters:
+          - name: instances
+            value: "{{workflow.parameters.instances}}"
+          - name: interface
+            value: "{{workflow.parameters.interface}}"
+
+      - name: process-data
+        template: process-pcaps
+        dependencies: [collect-data]
+
+      - name: analyze-data
+        template: analyze-dataset
+        dependencies: [process-data]
+
+      - name: upload-to-gcs
+        template: upload-results
+        dependencies: [analyze-data]
+        arguments:
+          parameters:
+          - name: gcs-bucket
+            value: "{{workflow.parameters.gcs-bucket}}"
+
+  # Step 0: Cleanup → wipe all sub-directories from the previous run
+  - name: cleanup-old-data
+    container:
+      image: alpine
+      command: ["sh", "-c"]
+      args:
+      - "rm -rf /app/data/pcap/* /app/data/pickle/* /app/data/analysis/* /app/data/logs/*"
+      volumeMounts:
+      - name: data-storage
+        mountPath: /app/data
+      resources:
+        requests:
+          memory: 64Mi
+          cpu: 100m
+        limits:
+          memory: 128Mi
+          cpu: 200m
+
+  # Step 1: Data Collection → writes to /app/data/pcap/ and /app/data/logs/
+  - name: collect-tor-traffic
+    inputs:
+      parameters:
+      - name: instances
+      - name: interface
+    container:
+      image: "{{workflow.parameters.image}}"
+      command: ["/bin/bash"]
+      args:
+      - -c
+      - |
+        set -e
+        echo "Starting Tor traffic collection..."
+        echo "Instances: {{inputs.parameters.instances}}, Interface: {{inputs.parameters.interface}}"
+
+        sudo service tor start
+        sleep 10
+
+        .venv/bin/python collect.py \
+          --instances {{inputs.parameters.instances}} \
+          --interface {{inputs.parameters.interface}}
+
+        # Persist logs alongside the captures so they survive across steps
+        cp data/progress.csv data/logs/ 2>/dev/null || mkdir -p data/logs && cp data/progress.csv data/logs/ || true
+        cp data/collection.log data/logs/ 2>/dev/null || true
+
+        echo "Data collection completed. Traces in /app/data/pcap/"
+
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["NET_RAW", "NET_ADMIN"]
+      volumeMounts:
+      - name: data-storage
+        mountPath: /app/data
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 1
+        limits:
+          memory: 4Gi
+          cpu: 2
+
+  # Step 2: Processing → reads /app/data/pcap/, writes /app/data/pickle/
+  - name: process-pcaps
+    container:
+      image: "{{workflow.parameters.image}}"
+      command: ["/bin/bash"]
+      args:
+      - -c
+      - |
+        set -e
+        echo "Processing pcap files from /app/data/pcap/ ..."
+
+        .venv/bin/python process.py
+
+        echo "Processing complete. Pickles in /app/data/pickle/"
+
+      volumeMounts:
+      - name: data-storage
+        mountPath: /app/data
+      resources:
+        requests:
+          memory: 4Gi
+          cpu: 1
+        limits:
+          memory: 8Gi
+          cpu: 2
+
+  # Step 3: Analysis → reads /app/data/pickle/, writes /app/data/analysis/
+  - name: analyze-dataset
+    container:
+      image: "{{workflow.parameters.image}}"
+      command: ["/bin/bash"]
+      args:
+      - -c
+      - |
+        set -e
+        echo "Running EDA on /app/data/pickle/ ..."
+
+        .venv/bin/python analyze.py
+
+        echo "Analysis complete. Plots in /app/data/analysis/"
+
+      volumeMounts:
+      - name: data-storage
+        mountPath: /app/data
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 500m
+        limits:
+          memory: 4Gi
+          cpu: 1
+
+  # Step 4: Upload → mirrors all sub-paths to GCS
+  - name: upload-results
+    inputs:
+      parameters:
+      - name: gcs-bucket
+    container:
+      image: google/cloud-sdk:alpine
+      command: ["/bin/sh"]
+      args:
+      - -c
+      - |
+        set -e
+        BUCKET="{{inputs.parameters.gcs-bucket}}"
+        # Use workflow name + creation timestamp as a unique run prefix so
+        # every run lands in its own GCS directory and nothing is overwritten.
+        RUN_PREFIX="runs/{{workflow.name}}"
+        echo "Uploading results to gs://${BUCKET}/${RUN_PREFIX}/"
+
+        # Authentication is provided automatically via GKE Workload Identity
+        # bound to the argo-workflow Kubernetes SA — no key file required.
+
+        [ -d "/data/pcap" ]     && gsutil -m cp -r /data/pcap     gs://${BUCKET}/${RUN_PREFIX}/pcap     && echo "Uploaded pcap/"
+        [ -d "/data/pickle" ]   && gsutil -m cp -r /data/pickle   gs://${BUCKET}/${RUN_PREFIX}/pickle   && echo "Uploaded pickle/"
+        [ -d "/data/analysis" ] && gsutil -m cp -r /data/analysis gs://${BUCKET}/${RUN_PREFIX}/analysis && echo "Uploaded analysis/"
+        [ -d "/data/logs" ]     && gsutil -m cp -r /data/logs     gs://${BUCKET}/${RUN_PREFIX}/logs     && echo "Uploaded logs/"
+
+        echo "All uploads completed to gs://${BUCKET}/${RUN_PREFIX}/"
+
+      volumeMounts:
+      - name: data-storage
+        mountPath: /data
+      resources:
+        requests:
+          memory: 512Mi
+          cpu: 200m
+        limits:
+          memory: 1Gi
+          cpu: 500m
+
+---
+
+# CronWorkflow for scheduled data collection (optional, starts suspended)
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: wf-data-collection-scheduled
+  namespace: argo
+spec:
+  schedule: "0 2 * * 0"  # Every Sunday at 2 AM UTC
+  timezone: "UTC"
+  suspend: true           # Enable manually when ready
+  workflowSpec:
+    entrypoint: wf-pipeline
+    serviceAccountName: argo-workflow
+    workflowTemplateRef:
+      name: wf-data-collection-pipeline
+    arguments:
+      parameters:
+      - name: instances
+        value: "90"
+      - name: interface
+        value: "eth0"

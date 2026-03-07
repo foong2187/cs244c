@@ -1,0 +1,133 @@
+# Argo Workflows installation for GKE
+# Apply this after creating the cluster: kubectl apply -f install-argo.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo
+
+---
+
+# ConfigMap for Argo Workflows configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-controller-configmap
+  namespace: argo
+data:
+  config: |
+    instanceID: argo-workflows-controller
+    parallelism: 1
+    
+    executor:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+          
+    workflowDefaults:
+      spec:
+        serviceAccountName: argo-workflow
+        archiveLogs: true
+
+---
+
+# Workflow Controller Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-controller
+  namespace: argo
+spec:
+  selector:
+    matchLabels:
+      app: workflow-controller
+  template:
+    metadata:
+      labels:
+        app: workflow-controller
+    spec:
+      serviceAccountName: argo-workflow
+      containers:
+      - name: workflow-controller
+        image: quay.io/argoproj/workflow-controller:v3.5.5
+        command: [workflow-controller]
+        args:
+        - --configmap=workflow-controller-configmap
+        - --executor-image=quay.io/argoproj/argoexec:v3.5.5
+        - --loglevel=info
+        - --gloglevel=0
+        env:
+        - name: LEADER_ELECTION_IDENTITY
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+---
+
+# Argo Server Deployment (for UI access)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argo-server
+  namespace: argo
+spec:
+  selector:
+    matchLabels:
+      app: argo-server
+  template:
+    metadata:
+      labels:
+        app: argo-server
+    spec:
+      serviceAccountName: argo-workflow
+      containers:
+      - name: argo-server
+        image: quay.io/argoproj/argocli:v3.5.5
+        command: [argo]
+        args:
+        - server
+        - --auth-mode=server
+        - --secure=false
+        - --loglevel=info
+        ports:
+        - containerPort: 2746
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+
+---
+
+# Service for Argo Server
+apiVersion: v1
+kind: Service
+metadata:
+  name: argo-server
+  namespace: argo
+spec:
+  type: LoadBalancer
+  # Restrict access to specific IP ranges - replace with your actual IP(s)
+  # Find your IP: curl ifconfig.me
+  loadBalancerSourceRanges:
+  - "182.156.23.2/32"
+  ports:
+  - port: 80
+    targetPort: 2746
+    protocol: TCP
+  selector:
+    app: argo-server

@@ -54,7 +54,18 @@ outputs/
 .idea/
 *.swp
 *.swo
+*.bak
 
 # Secrets / credentials
 .env
 *.key
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+tfplan
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
