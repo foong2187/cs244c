@@ -1,0 +1,22 @@
+# Top 20 sites for Run 2 (20 sites × 500 traces)
+# Format: label<TAB>url
+0	https://www.google.com
+1	https://www.youtube.com
+2	https://www.facebook.com
+3	https://www.baidu.com
+4	https://www.wikipedia.org
+5	https://www.qq.com
+6	https://www.taobao.com
+7	https://www.yahoo.com
+8	https://www.tmall.com
+9	https://www.amazon.com
+10	https://www.twitter.com
+11	https://www.sohu.com
+12	https://www.live.com
+13	https://www.jd.com
+14	https://www.vk.com
+15	https://www.instagram.com
+16	https://www.sina.com.cn
+17	https://www.weibo.com
+18	https://www.reddit.com
+19	https://www.360.cn

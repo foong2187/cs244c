@@ -161,26 +161,62 @@ class TraceCollector:
                 status, f"{duration:.1f}", pcap_size, error_msg,
             ])
 
+    def _kill_stale_tor(self) -> None:
+        """Kill any leftover Tor processes from previous runs."""
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "TorBrowser/Tor/tor"],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode == 0:
+                logger.info("Killed stale Tor process(es)")
+                time.sleep(2)  # Wait for ports to free up
+        except Exception:
+            pass
+
     def start_tor(self) -> None:
         """Launch Tor and open a stem controller connection.
 
         Uses tbselenium's utility to launch the Tor process with the
         Tor Browser Bundle, then connects via stem's Controller.
+        Retries the control port connection since Tor may take a few
+        seconds to open it.
         """
-        from stem import Signal
+        from stem import SocketError
         from stem.control import Controller
+        from tbselenium import common as cm
         from tbselenium.utils import launch_tbb_tor_with_stem
+
+        # Kill any leftover Tor from a previous crashed run
+        self._kill_stale_tor()
 
         logger.info("Starting Tor...")
 
         tbb_path = self.tor_browser_path
         self.tor_process = launch_tbb_tor_with_stem(tbb_path=tbb_path)
+        control_port = cm.STEM_CONTROL_PORT  # tbselenium default: 9251
 
-        # Connect controller on default control port
-        self.controller = Controller.from_port(port=9051)
-        self.controller.authenticate()
-
-        logger.info("Tor started and controller connected")
+        # Retry controller connection — Tor needs time to open the port
+        logger.info(f"Connecting to Tor control port {control_port}...")
+        max_attempts = 15
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.controller = Controller.from_port(port=control_port)
+                self.controller.authenticate()
+                logger.info("Tor started and controller connected")
+                break
+            except (SocketError, OSError) as e:
+                if attempt == max_attempts:
+                    logger.error(
+                        f"Could not connect to Tor control port after "
+                        f"{max_attempts} attempts: {e}"
+                    )
+                    raise
+                logger.debug(
+                    f"Control port not ready (attempt {attempt}/{max_attempts}), "
+                    f"retrying in 2s..."
+                )
+                time.sleep(2)
 
         # Wait for a circuit to be established
         self._wait_for_circuit(timeout=60)
@@ -337,6 +373,7 @@ class TraceCollector:
         Returns:
             Page load duration in seconds.
         """
+        from tbselenium import common as cm
         from tbselenium.tbdriver import TorBrowserDriver
 
         if timeout is None:
@@ -346,7 +383,7 @@ class TraceCollector:
 
         driver = TorBrowserDriver(
             self.tor_browser_path,
-            tor_cfg=0,  # Use system Tor (we manage it via stem)
+            tor_cfg=cm.USE_STEM,
             tbb_logfile_path=str(self.collected_dir / "tbb.log"),
         )
 

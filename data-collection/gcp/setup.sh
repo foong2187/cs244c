@@ -32,6 +32,10 @@ sudo apt-get install -y -qq \
     python3-dev \
     libffi-dev \
     libssl-dev \
+    libgtk-3-0 \
+    libdbus-glib-1-2 \
+    libxt6 \
+    libasound2 \
     curl \
     wget \
     tmux \

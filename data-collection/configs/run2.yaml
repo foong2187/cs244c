@@ -1,0 +1,24 @@
+# Run 2: 20 sites × 500 traces
+# Separate data directory to preserve run 1 data
+
+data:
+  raw_dir: "data/raw"
+  collected_dir: "data/collected_v2"
+  site_list: "data/collected_v2/site_list.txt"
+  sequence_length: 5000
+
+collection:
+  num_batches: 500
+  page_load_timeout: 60
+  post_load_wait: 5
+  newnym_wait: 10
+  max_retries: 3
+  min_trace_packets: 50
+  tor_browser_path: "/opt/tor-browser"
+
+preprocessing:
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+
+seed: 42

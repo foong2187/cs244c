@@ -100,10 +100,14 @@ def _is_private_ip(ip: str) -> bool:
     return ip.startswith(private_prefixes)
 
 
+DLT_LINUX_SLL2 = 276
+
+
 def _extract_ip(datalink: int, buf: bytes):
     """Extract the IP packet from a raw frame buffer.
 
-    Handles Ethernet (DLT_EN10MB) and Linux cooked capture (DLT_LINUX_SLL).
+    Handles Ethernet (DLT_EN10MB), Linux cooked capture (DLT_LINUX_SLL),
+    Linux cooked v2 (DLT_LINUX_SLL2), and raw IP (DLT_RAW).
 
     Returns:
         dpkt.ip.IP or dpkt.ip6.IP6 packet, or None if not IP.
@@ -117,6 +121,16 @@ def _extract_ip(datalink: int, buf: bytes):
             sll = dpkt.sll.SLL(buf)
             if isinstance(sll.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
                 return sll.data
+        elif datalink == DLT_LINUX_SLL2:
+            # SLL2: 20-byte header, protocol at bytes 0-1
+            if len(buf) < 20:
+                return None
+            proto = int.from_bytes(buf[0:2], "big")
+            ip_buf = buf[20:]
+            if proto == 0x0800:
+                return dpkt.ip.IP(ip_buf)
+            elif proto == 0x86DD:
+                return dpkt.ip6.IP6(ip_buf)
         elif datalink == dpkt.pcap.DLT_RAW:
             # Raw IP, no link layer header
             version = (buf[0] >> 4) & 0xF
@@ -253,16 +267,23 @@ def main():
 
     # Determine guard IP
     guard_ip = args.guard_ip
-    if guard_ip is None:
-        logger.info("Auto-detecting guard IP from first PCAP...")
-        guard_ip = detect_guard_ip_from_pcap(pcap_files[0])
-
-    logger.info(f"Using guard IP: {guard_ip}")
+    per_pcap_detection = guard_ip is None
+    if per_pcap_detection:
+        logger.info("Will auto-detect guard IP per PCAP")
 
     # Convert each PCAP
     converted = 0
     skipped = 0
     for pcap_path in tqdm(pcap_files, desc="Converting PCAPs"):
+        # Auto-detect guard IP from each PCAP (guard may change across batches)
+        if per_pcap_detection:
+            try:
+                guard_ip = detect_guard_ip_from_pcap(pcap_path)
+            except RuntimeError:
+                logger.warning(f"No IP packets in {pcap_path.name}, skipping")
+                skipped += 1
+                continue
+
         trace = pcap_to_trace(pcap_path, guard_ip)
 
         if not trace:
