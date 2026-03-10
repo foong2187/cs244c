@@ -33,7 +33,12 @@ BASE_SOCKS_PORT = 9060
 BASE_CONTROL_PORT = 9061
 
 
-def _launch_tor_instance(worker_id, data_dir, timeout=120):
+def _tor_data_dir(worker_id):
+    """Per-worker Tor DataDirectory (isolated state)."""
+    return os.path.join(REPO_ROOT, "data", "tor-crawler-dirs", str(worker_id))
+
+
+def _launch_tor_instance(worker_id, data_dir, timeout=240):
     """Launch a Tor process for this worker. Returns (tor_process, socks_port, control_port)."""
     from stem.process import launch_tor_with_config
 
@@ -41,7 +46,7 @@ def _launch_tor_instance(worker_id, data_dir, timeout=120):
     control_port = BASE_CONTROL_PORT + worker_id * 2
 
     print(f"[W{worker_id}] Starting Tor (SOCKS={socks_port}, Control={control_port})...")
-    # 180s: slow networks or 10 parallel bootstraps often need more than 90s
+    # 240s: GCP/slow networks or many parallel bootstraps often need >120s
     # Log to stdout so stem sees "Bootstrapped X%" (stem reads stdout, Tor defaults to stderr)
     tor_process = launch_tor_with_config(
         config={
@@ -194,7 +199,7 @@ def main():
         )
         p.start()
         processes.append(p)
-        time.sleep(5)  # stagger Tor launches to avoid bootstrap overload
+        time.sleep(15)  # stagger Tor launches so bootstrap isn't overloaded (GCP needs more)
 
     for p in processes:
         p.join()
