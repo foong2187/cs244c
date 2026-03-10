@@ -21,7 +21,6 @@ import multiprocessing
 import os
 import shutil
 import sys
-import tempfile
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,13 +41,15 @@ def _launch_tor_instance(worker_id, data_dir, timeout=120):
     control_port = BASE_CONTROL_PORT + worker_id * 2
 
     print(f"[W{worker_id}] Starting Tor (SOCKS={socks_port}, Control={control_port})...")
+    # 180s: slow networks or 10 parallel bootstraps often need more than 90s
+    # Log to stdout so stem sees "Bootstrapped X%" (stem reads stdout, Tor defaults to stderr)
     tor_process = launch_tor_with_config(
         config={
             "SocksPort": str(socks_port),
             "ControlPort": str(control_port),
             "DataDirectory": data_dir,
             "CookieAuthentication": "0",
-            "Log": "notice stderr",
+            "Log": "notice stdout",
         },
         timeout=timeout,
         take_ownership=True,
@@ -78,7 +79,7 @@ def _worker_main(worker_id, sites, visits, visit_start, output_dir, pcap_dir,
     """Entry point for each worker process."""
     from crawler.crawl import run_crawl
 
-    data_dir = os.path.join(tempfile.gettempdir(), f"tor-crawler-{worker_id}")
+    data_dir = _tor_data_dir(worker_id)
     os.makedirs(data_dir, exist_ok=True)
 
     max_tor_restarts = 5
@@ -172,6 +173,8 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.pcap_dir, exist_ok=True)
+    tor_dirs_parent = os.path.join(REPO_ROOT, "data", "tor-crawler-dirs")
+    os.makedirs(tor_dirs_parent, exist_ok=True)
 
     # All workers share the same output/pcap dirs and progress CSV.
     # Sites are split across workers (round-robin for balance).
