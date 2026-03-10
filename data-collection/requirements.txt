@@ -6,4 +6,5 @@ selenium
 tbselenium
 dpkt
 gdown
+scipy
 pytest
