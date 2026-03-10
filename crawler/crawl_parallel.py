@@ -23,6 +23,12 @@ import shutil
 import sys
 import time
 
+# Force unbuffered stdout so nohup logs are visible in real time
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+else:
+    sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -64,9 +70,12 @@ def _launch_tor_instance(worker_id, data_dir, timeout=240):
 
 
 def _is_tor_dead(exc):
-    """Check if exception indicates Tor control connection died."""
+    """Check if exception indicates Tor died or failed to start."""
     s = str(exc).lower()
-    if "connection reset" in s or "socketclosed" in s:
+    if any(k in s for k in ("connection reset", "socketclosed", "timeout without success",
+                             "broken pipe", "connection refused")):
+        return True
+    if isinstance(exc, OSError):
         return True
     try:
         from stem import SocketClosed
@@ -94,6 +103,9 @@ def _worker_main(worker_id, sites, visits, visit_start, output_dir, pcap_dir,
         for attempt in range(max_tor_restarts):
             tor_proc = None
             try:
+                if attempt > 0:
+                    shutil.rmtree(data_dir, ignore_errors=True)
+                    os.makedirs(data_dir, exist_ok=True)
                 tor_proc, socks_port, control_port = _launch_tor_instance(worker_id, data_dir)
                 run_crawl(
                     sites, socks_port=socks_port, control_port=control_port,
@@ -111,11 +123,13 @@ def _worker_main(worker_id, sites, visits, visit_start, output_dir, pcap_dir,
                     except Exception:
                         pass
                     tor_proc = None
-                if _is_tor_dead(e) and attempt < max_tor_restarts - 1:
-                    print(f"[W{worker_id}] Tor died, restarting... ({attempt + 1}/{max_tor_restarts})")
-                    time.sleep(15)
+                if attempt < max_tor_restarts - 1:
+                    wait = 15 + attempt * 10
+                    print(f"[W{worker_id}] Tor failed ({e}), retrying in {wait}s... "
+                          f"({attempt + 1}/{max_tor_restarts})")
+                    time.sleep(wait)
                     continue
-                print(f"[W{worker_id}] ERROR: {e}")
+                print(f"[W{worker_id}] ERROR after {max_tor_restarts} attempts: {e}")
                 import traceback
                 traceback.print_exc()
                 break
