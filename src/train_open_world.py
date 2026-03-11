@@ -42,8 +42,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Train and evaluate DF model in open-world scenario')
     parser.add_argument('--defense', type=str, default='NoDef',
-                        choices=['NoDef', 'WTFPAD', 'WalkieTalkie'],
-                        help='Defense type (default: NoDef)')
+                        help='Defense subdirectory under dataset/OpenWorld/ '
+                             '(default: NoDef)')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Training epochs (default: 30 for NoDef/W-T, '
                              '40 for WTF-PAD)')

@@ -1,10 +1,11 @@
 """
 Closed-world training and evaluation for the Deep Fingerprinting (DF) model.
 
-Supports three dataset types:
-  - NoDef:         Non-defended Tor traffic (95 classes, 30 epochs)
-  - WTFPAD:        WTF-PAD defended traffic  (95 classes, 40 epochs)
-  - WalkieTalkie:  Walkie-Talkie defended traffic (100 classes, 30 epochs)
+Supports multiple dataset types (depending on what exists under `dataset/ClosedWorld/`):
+  - NoDef:         Non-defended Tor traffic
+  - WTFPAD:        WTF-PAD defended traffic
+  - WalkieTalkie:  Walkie-Talkie defended traffic
+  - BuFLO / Tamaraw / RegulaTor / BRO: modern defenses (if provided)
 
 Usage:
     python train_closed_world.py --defense NoDef
@@ -40,8 +41,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Train and evaluate DF model in closed-world scenario')
     parser.add_argument('--defense', type=str, default='NoDef',
-                        choices=['NoDef', 'WTFPAD', 'WalkieTalkie'],
-                        help='Defense type (default: NoDef)')
+                        help='Defense subdirectory under dataset/ClosedWorld/ '
+                             '(default: NoDef)')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Number of training epochs '
                              '(default: 30 for NoDef/W-T, 40 for WTF-PAD)')
