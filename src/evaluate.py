@@ -254,6 +254,127 @@ def plot_training_history(history, title='Training History', save_path=None):
     plt.close()
 
 
+def plot_confusion_matrix(cm, class_names=None, title='Confusion Matrix',
+                          save_path=None):
+    """Plot row-normalized confusion matrix as a heatmap.
+
+    Args:
+        cm: Confusion matrix from compute_confusion_matrix(), shape (C, C).
+        class_names: Optional list of class label strings.
+        title: Plot title.
+        save_path: If provided, save figure to this path.
+    """
+    import matplotlib.pyplot as plt
+
+    n = cm.shape[0]
+    cm_norm = cm / cm.sum(axis=1, keepdims=True).clip(min=1)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cm_norm, cmap='Blues', vmin=0, vmax=1)
+    plt.colorbar(im, ax=ax)
+
+    if class_names is not None:
+        ax.set_xticks(range(n))
+        ax.set_yticks(range(n))
+        ax.set_xticklabels(class_names, rotation=90, fontsize=6)
+        ax.set_yticklabels(class_names, fontsize=6)
+
+    ax.set_xlabel('Predicted', fontsize=12)
+    ax.set_ylabel('True', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Confusion matrix saved to {save_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_per_class_accuracy(y_true, y_pred, class_names=None,
+                            title='Per-Class Accuracy', save_path=None):
+    """Bar chart of per-class accuracy sorted ascending.
+
+    Args:
+        y_true: Array of true class indices.
+        y_pred: Array of predicted class indices.
+        class_names: Optional list of class label strings.
+        title: Plot title.
+        save_path: If provided, save figure to this path.
+    """
+    import matplotlib.pyplot as plt
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    num_classes = int(y_true.max()) + 1
+
+    accs = np.array([(y_pred[y_true == c] == c).mean()
+                     for c in range(num_classes)])
+    order = np.argsort(accs)
+    labels = ([class_names[i] for i in order] if class_names is not None
+              else [str(i) for i in order])
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(range(num_classes), accs[order], color='steelblue', width=0.8)
+    ax.axhline(accs.mean(), color='red', linestyle='--', linewidth=1,
+               label=f'Mean ({accs.mean():.3f})')
+    ax.set_xticks(range(num_classes))
+    ax.set_xticklabels(labels, rotation=90, fontsize=6)
+    ax.set_xlabel('Website (sorted by accuracy)', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Per-class accuracy plot saved to {save_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_confidence_distribution(y_true, y_pred_probs,
+                                 title='Prediction Confidence', save_path=None):
+    """Histogram of max predicted probability for correct vs. incorrect samples.
+
+    Args:
+        y_true: Array of true class indices.
+        y_pred_probs: Prediction probability matrix, shape (N, num_classes).
+        title: Plot title.
+        save_path: If provided, save figure to this path.
+    """
+    import matplotlib.pyplot as plt
+
+    y_pred = np.argmax(y_pred_probs, axis=1)
+    max_probs = np.max(y_pred_probs, axis=1)
+    correct = max_probs[y_pred == y_true]
+    incorrect = max_probs[y_pred != y_true]
+
+    bins = np.linspace(0, 1, 40)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(correct, bins=bins, alpha=0.65, color='steelblue',
+            label=f'Correct (n={len(correct)})')
+    ax.hist(incorrect, bins=bins, alpha=0.65, color='tomato',
+            label=f'Incorrect (n={len(incorrect)})')
+    ax.set_xlabel('Max predicted probability', fontsize=12)
+    ax.set_ylabel('Count', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Confidence distribution saved to {save_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
 def compute_confusion_matrix(y_true, y_pred, num_classes):
     """Compute confusion matrix.
 
