@@ -18,8 +18,8 @@ echo "Building Docker image: ${FULL_IMAGE_NAME}"
 cp -r ../../data-collection .
 trap 'rm -rf data-collection/' EXIT
 
-# Build the Docker image
-docker build -t "${FULL_IMAGE_NAME}" .
+# Build the Docker image for linux/amd64 (GKE nodes are x86_64)
+docker buildx build --platform linux/amd64 -t "${FULL_IMAGE_NAME}" --load .
 
 echo "Docker image built successfully: ${FULL_IMAGE_NAME}"
 

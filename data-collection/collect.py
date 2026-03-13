@@ -25,29 +25,23 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from tqdm import tqdm
 
-SITES_FILE      = Path(__file__).parent / "sites.txt"
-PCAP_DIR        = Path(__file__).parent / "data" / "pcap"
-PROGRESS_FILE   = Path(__file__).parent / "data" / "progress.csv"
-LOG_FILE        = Path(__file__).parent / "data" / "collection.log"
+SITES_FILE = Path(__file__).parent / "sites.txt"
+
+# These are set after args are parsed (depend on --user-id and --data-dir)
+PCAP_DIR      : Path
+PROGRESS_FILE : Path
+LOG_FILE      : Path
 
 TOR_SOCKS_PORT   = 9050
+
 TOR_CONTROL_PORT = 9051
 TOR_CONTROL_PASS = "cs244c_collection"
 
 PAGE_TIMEOUT     = 60   # seconds to wait for full page load
 POST_LOAD_WAIT   = 5    # seconds after readyState==complete
 NEWNYM_WAIT      = 5    # seconds to wait after requesting new circuit
-MAX_RETRIES      = 3    # retries per (site, instance) before skipping
+MAX_RETRIES      = 2    # retries per (site, instance) before skipping
 
-PCAP_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ]
-)
 log = logging.getLogger(__name__)
 
 
@@ -88,8 +82,8 @@ def log_progress(site_idx: int, instance: int, url: str,
 
 
 def get_guard_ip(controller) -> str:
-    """Return the IP of the current Tor entry guard, retrying up to 15s."""
-    for _ in range(15):
+    """Return the IP of the current Tor entry guard, retrying up to 60s."""
+    for _ in range(60):
         try:
             for circuit in controller.get_circuits():
                 if circuit.status == "BUILT" and circuit.path:
@@ -99,7 +93,7 @@ def get_guard_ip(controller) -> str:
         except Exception:
             pass
         time.sleep(1)
-    raise RuntimeError("Could not determine Tor guard IP after 15s")
+    raise RuntimeError("Could not determine Tor guard IP after 60s")
 
 
 def new_circuit(controller):
@@ -189,11 +183,49 @@ def parse_args():
     p.add_argument("--max-sites", type=int, default=None,
                    help="Only collect from the first N sites (default: all). "
                         "Useful for quick smoke tests.")
+    p.add_argument("--user-id", type=str, default="user-000",
+                   help="Unique identifier for this collector pod. Output is "
+                        "written to /app/data/<user-id>/pcap/ so parallel pods "
+                        "do not collide. (default: user-000)")
+    p.add_argument("--data-dir", type=str, default=None,
+                   help="Base data directory (default: <script_dir>/data). "
+                        "Inside k8s pods this is typically /app/data.")
+    p.add_argument("--gcs-bucket", type=str, default=None,
+                   help="Unused. Raw pcaps are kept on node disk; only "
+                        "process.py and analyze.py push outputs to GCS.")
+    p.add_argument("--gcs-prefix", type=str, default="",
+                   help="Unused by collect.py. Kept for CLI compatibility.")
+    p.add_argument("--shard-index", type=int, default=0,
+                   help="0-based index of this pod's shard (default: 0). "
+                        "Use with --num-shards to split sites across pods.")
+    p.add_argument("--num-shards", type=int, default=1,
+                   help="Total number of shards/pods (default: 1 = no sharding).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # ── resolve paths based on --data-dir and --user-id ─────────────────────
+    base_dir = Path(args.data_dir) if args.data_dir else Path(__file__).parent / "data"
+    user_dir = base_dir / args.user_id
+
+    global PCAP_DIR, PROGRESS_FILE, LOG_FILE
+    PCAP_DIR      = user_dir / "pcap"
+    PROGRESS_FILE = user_dir / "progress.csv"
+    LOG_FILE      = user_dir / "collection.log"
+
+    PCAP_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler(sys.stdout),
+        ]
+    )
 
     deadline = None
     if args.time_limit:
@@ -204,6 +236,16 @@ def main():
              if s.strip() and not s.startswith("#")]
     if args.max_sites:
         sites = sites[:args.max_sites]
+
+    # Shard sites across pods: pod i gets sites[start:end]
+    if args.num_shards > 1:
+        shard_size = -(-len(sites) // args.num_shards)  # ceiling division
+        start = args.shard_index * shard_size
+        end   = min(start + shard_size, len(sites))
+        sites = sites[start:end]
+        log.info(f"Shard {args.shard_index}/{args.num_shards}: "
+                 f"sites[{start}:{end}] ({len(sites)} sites)")
+
     log.info(f"Loaded {len(sites)} sites, collecting {args.instances} "
              f"instances each = {len(sites) * args.instances} total visits")
 
@@ -305,7 +347,7 @@ def main():
     collected = len(load_progress())
     log.info(f"Done. Total successful traces: {collected} / {total_visits}")
     log.info(f"pcap files are in: {PCAP_DIR}")
-    log.info("Next step: run  .venv/bin/python process.py")
+    log.info("Data persists on node disk. Next step: process.py will read it.")
 
 
 if __name__ == "__main__":

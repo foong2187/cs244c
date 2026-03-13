@@ -6,10 +6,8 @@ project_id = "your-gcp-project-id"
 # Optional: Override defaults if needed
 # region = "us-central1"
 # zone = "us-central1-a"
-# cluster_name = "wf-data-collection-cluster"
-# machine_type = "e2-standard-4"
-# disk_size_gb = 100
-# min_node_count = 1
-# max_node_count = 5
-# initial_node_count = 2
-# gcs_bucket_name = "wf-data-collection-storage"
+# cluster_name = "wflab-cluster"
+# machine_type = "e2-standard-32"   # single large node; size for num-users * 2 CPUs
+# disk_size_gb = 400                 # shared by all pods via hostPath
+# node_count = 1                     # fixed; parallelism comes from pods not nodes
+# gcs_bucket_name = "wflab-storage"

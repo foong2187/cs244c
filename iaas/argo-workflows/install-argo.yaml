@@ -17,7 +17,7 @@ metadata:
 data:
   config: |
     instanceID: argo-workflows-controller
-    parallelism: 1
+    parallelism: 20
     
     executor:
       resources:
@@ -31,7 +31,6 @@ data:
     workflowDefaults:
       spec:
         serviceAccountName: argo-workflow
-        archiveLogs: true
 
 ---
 
@@ -124,7 +123,7 @@ spec:
   # Restrict access to specific IP ranges - replace with your actual IP(s)
   # Find your IP: curl ifconfig.me
   loadBalancerSourceRanges:
-  - "182.156.23.2/32"
+  - "122.171.18.11/32"
   ports:
   - port: 80
     targetPort: 2746

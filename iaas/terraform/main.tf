@@ -115,19 +115,13 @@ resource "google_container_node_pool" "primary_nodes" {
   name       = var.node_pool_name
   location   = var.zone
   cluster    = google_container_cluster.primary.name
-  node_count = var.initial_node_count
+  node_count = var.node_count
 
   # Ensure APIs are fully ready before nodes try to join
   depends_on = [google_container_cluster.primary]
 
-  autoscaling {
-    min_node_count = var.min_node_count
-    max_node_count = var.max_node_count
-  }
-
   node_config {
-  #preemptible  = false
-    spot = true
+    spot         = false
     machine_type = var.machine_type
     disk_size_gb = var.disk_size_gb
     disk_type    = "pd-balanced"
@@ -158,15 +152,11 @@ resource "google_container_node_pool" "primary_nodes" {
 
   lifecycle {
     ignore_changes = [
-      # GKE auto-populates kubelet_config, resource_labels, and management
-      # defaults after creation. Removing them generates an empty update
-      # mask which GCP rejects with Error 400. Ignore the whole node_config
-      # and management blocks since the pool is already provisioned correctly.
-      node_config,
+      # GKE auto-populates these after creation; ignoring prevents spurious
+      # UpdateNodePool calls that the API rejects when no real field changes.
       management,
-      # Autoscaler manages node_count after creation; ignore drift to avoid
-      # a forced node pool update on every deploy.sh run.
-      node_count,
+      node_config[0].resource_labels,
+      node_config[0].kubelet_config,
     ]
   }
 }
@@ -182,6 +172,13 @@ resource "google_service_account" "gke_node_sa" {
 resource "google_project_iam_member" "gke_node_sa_registry" {
   project = var.project_id
   role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${google_service_account.gke_node_sa.email}"
+}
+
+# GCR now uses Artifact Registry as its backend — nodes need this to pull images.
+resource "google_project_iam_member" "gke_node_sa_artifact_registry" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
   member  = "serviceAccount:${google_service_account.gke_node_sa.email}"
 }
 

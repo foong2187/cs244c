@@ -45,11 +45,6 @@ output "argo_service_account_email" {
   value       = google_service_account.argo_sa.email
 }
 
-output "data_storage_disk_name" {
-  description = "Name of the single persistent disk used for all workflow data (pcap/, pickle/, analysis/, logs/)"
-  value       = google_compute_disk.data_storage_disk.name
-}
-
 output "vpc_network_name" {
   description = "Name of the VPC network"
   value       = google_compute_network.vpc_network.name

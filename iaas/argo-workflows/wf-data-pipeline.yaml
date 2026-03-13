@@ -1,9 +1,23 @@
 # Website Fingerprinting Data Collection Pipeline
 # This workflow orchestrates the complete data collection process:
-# 1. collect.py  – Collect pcap files from Tor traffic  → /app/data/pcap/
-# 2. process.py  – Convert pcaps to direction sequences  → /app/data/pickle/
-# 3. analyze.py  – Exploratory data analysis             → /app/data/analysis/
-# 4. upload      – Push all sub-directories to GCS
+# 1. cleanup    – wipe /data/runs/<wf>/ from previous run (if any)
+# 2. collect.py – N parallel pods ("users"), each capturing pcap traces
+#                 for all sites → writes to hostPath /data/runs/<wf>/user-NNN/
+#                 Data persists on node disk after pod exits.
+# 3. process.py – single pod: reads all user pcaps from hostPath,
+#                 converts to direction sequences → pickles → pushes to GCS
+# 4. analyze.py – single pod: reads pickles from hostPath, runs EDA →
+#                 plots → pushes analysis to GCS
+#
+# Storage strategy:
+#   • hostPath (/data/runs/<workflow-name>/) – node-local persistent directory
+#     on the 400 GB boot disk. Survives pod exits. All pods share the same
+#     node (node_count = 1) so hostPath is always reachable by every pod.
+#     Raw pcaps live here only; they are NOT uploaded to GCS.
+#   • GCS – durable store for transformed outputs only: pickle/ and analysis/
+#
+# NOTE: This design requires node_count = 1 in Terraform. If you ever add a
+# second node, add a nodeSelector/affinity to pin all pods to the same node.
 
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -14,12 +28,11 @@ spec:
   entrypoint: wf-pipeline
   serviceAccountName: argo-workflow
 
-  # Global parameters
   arguments:
     parameters:
     - name: instances
-      value: "1"
-      description: "Number of instances to collect per site"
+      value: "10"
+      description: "Number of traces per site per user"
     - name: interface
       value: "eth0"
       description: "Network interface for packet capture"
@@ -28,64 +41,82 @@ spec:
       description: "Docker image for data collection"
     - name: gcs-bucket
       value: "wflab-storage-wflab01-247b0fef"
-      description: "GCS bucket for data storage"
+      description: "GCS bucket — receives only pickle/ and analysis/ outputs"
+    - name: num-users
+      value: "10"
+      description: "Number of parallel collector pods (simulated users)"
 
-  # Single persistent volume shared by all steps.
-  # Sub-paths within the volume keep each step's output isolated:
-  #   pcap/       – raw tcpdump captures (written by step 1)
-  #   pickle/     – processed numpy arrays (written by step 2)
-  #   analysis/   – EDA plots (written by step 3)
-  #   logs/       – progress.csv + collection.log (written by step 1)
+  # hostPath volume rooted at /data on the node disk.
+  # All pods in the workflow mount sub-paths of this directory so they can
+  # read each other's outputs across pod boundaries.
   volumes:
-  - name: data-storage
-    persistentVolumeClaim:
-      claimName: data-storage-pvc
+  - name: node-data
+    hostPath:
+      path: /home/data
+      type: DirectoryOrCreate
 
   templates:
 
-  # Main pipeline orchestration (sequential DAG)
+  # ── Main orchestration (sequential DAG) ────────────────────────────────────
   - name: wf-pipeline
     dag:
       tasks:
+      # Step 0: wipe this run's directory so reruns start clean
       - name: cleanup
-        template: cleanup-old-data
+        template: cleanup-run-dir
 
+      # Step 1: fan-out — one pod per simulated user, all run in parallel
       - name: collect-data
         template: collect-tor-traffic
         dependencies: [cleanup]
         arguments:
           parameters:
+          - name: user-id
+            value: "user-{{item}}"
+          - name: shard-index
+            value: "{{item}}"
           - name: instances
             value: "{{workflow.parameters.instances}}"
           - name: interface
             value: "{{workflow.parameters.interface}}"
+        withSequence:
+          count: "{{workflow.parameters.num-users}}"
 
+      # Step 2: single pod — reads all users' pcaps from hostPath, produces pickles
       - name: process-data
         template: process-pcaps
         dependencies: [collect-data]
-
-      - name: analyze-data
-        template: analyze-dataset
-        dependencies: [process-data]
-
-      - name: upload-to-gcs
-        template: upload-results
-        dependencies: [analyze-data]
         arguments:
           parameters:
           - name: gcs-bucket
             value: "{{workflow.parameters.gcs-bucket}}"
+          - name: gcs-prefix
+            value: "runs/{{workflow.name}}"
 
-  # Step 0: Cleanup → wipe all sub-directories from the previous run
-  - name: cleanup-old-data
+      # Step 3: single pod — reads pickles from hostPath, produces EDA plots
+      - name: analyze-data
+        template: analyze-dataset
+        dependencies: [process-data]
+        arguments:
+          parameters:
+          - name: gcs-bucket
+            value: "{{workflow.parameters.gcs-bucket}}"
+          - name: gcs-prefix
+            value: "runs/{{workflow.name}}"
+
+  # ── Step 0: cleanup ─────────────────────────────────────────────────────────
+  # Wipes ALL previous run directories from the node disk at the start of each
+  # workflow run. This keeps the 400 GB node disk from accumulating stale data
+  # over time and removes the need for any separate maintenance task.
+  - name: cleanup-run-dir
     container:
       image: alpine
       command: ["sh", "-c"]
       args:
-      - "rm -rf /app/data/pcap/* /app/data/pickle/* /app/data/analysis/* /app/data/logs/*"
+      - "rm -rf /data/runs/* && mkdir -p /data/runs/{{workflow.name}} && echo 'All previous runs cleared, new run directory ready'"
       volumeMounts:
-      - name: data-storage
-        mountPath: /app/data
+      - name: node-data
+        mountPath: /data
       resources:
         requests:
           memory: 64Mi
@@ -94,12 +125,16 @@ spec:
           memory: 128Mi
           cpu: 200m
 
-  # Step 1: Data Collection → writes to /app/data/pcap/ and /app/data/logs/
+  # ── Step 1: parallel collector pods ────────────────────────────────────────
+  # Each pod writes to /data/runs/<wf>/user-N/{pcap,logs}/ on the node disk.
+  # Data persists after the pod exits — no GCS upload of raw pcaps.
   - name: collect-tor-traffic
     inputs:
       parameters:
       - name: instances
       - name: interface
+      - name: user-id
+      - name: shard-index
     container:
       image: "{{workflow.parameters.image}}"
       command: ["/bin/bash"]
@@ -109,125 +144,158 @@ spec:
         set -e
         echo "Starting Tor traffic collection..."
         echo "Instances: {{inputs.parameters.instances}}, Interface: {{inputs.parameters.interface}}"
+        echo "Writing to /data/runs/{{workflow.name}}/{{inputs.parameters.user-id}}/"
+
+        # Add log directive BEFORE starting Tor so we capture bootstrap output
+        # info level shows relay connection attempts with IP:port (notice only shows bootstrap %)
+        echo "Log info file /tmp/tor.log" >> /etc/tor/torrc
+        echo "Log notice stdout" >> /etc/tor/torrc
+
+        # Only connect to relays on ports 80/443 — GKE blocks port 9001 (default Tor relay port)
+        # Without this, Tor randomly picks guard nodes that may be unreachable, causing intermittent failures
+        echo "FascistFirewall 1" >> /etc/tor/torrc
+        echo "CircuitBuildTimeout 60" >> /etc/tor/torrc
+
+        echo "=== Network connectivity check ==="
+        curl -sf --max-time 5 https://check.torproject.org/ -o /dev/null && echo "torproject.org reachable" || echo "torproject.org NOT reachable"
+        curl -sf --max-time 5 https://www.google.com/ -o /dev/null && echo "google.com reachable" || echo "google.com NOT reachable"
 
         sudo service tor start
-        sleep 10
+
+        echo "Waiting for Tor SOCKS port 9050..."
+        for i in $(seq 1 60); do
+          if ss -tlnp 2>/dev/null | grep -q ":9050" || netstat -tlnp 2>/dev/null | grep -q ":9050"; then
+            echo "Tor SOCKS port is up after ${i}s"
+            break
+          fi
+          if [ "$i" -eq 60 ]; then
+            echo "ERROR: Tor SOCKS port never came up."
+            echo "=== Tor log ==="
+            cat /tmp/tor.log 2>/dev/null || echo "(no tor log)"
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "=== Tor bootstrap status (watching log) ==="
+        for i in $(seq 1 120); do
+          BOOTSTRAP=$(grep "Bootstrapped" /tmp/tor.log 2>/dev/null | tail -1 || echo "")
+          echo "[${i}s] ${BOOTSTRAP:-no bootstrap line yet}"
+          if echo "$BOOTSTRAP" | grep -q "Bootstrapped 100%"; then
+            echo "Tor fully bootstrapped!"
+            break
+          fi
+          if [ "$i" -eq 120 ]; then
+            echo "ERROR: Tor did not reach 100% bootstrap after 120s."
+            echo "=== Last 40 lines of Tor log (ports being tried) ==="
+            tail -40 /tmp/tor.log 2>/dev/null || echo "(empty)"
+            echo "=== Grep for connection attempts ==="
+            grep -i "connect\|attempt\|failed\|refused\|timeout\|port\|relay\|guard" /tmp/tor.log 2>/dev/null | tail -20 || echo "(none)"
+            echo "=== Tor process status ==="
+            ps aux | grep tor || echo "(no tor process)"
+            exit 1
+          fi
+          sleep 1
+        done
 
         .venv/bin/python collect.py \
-          --instances {{inputs.parameters.instances}} \
-          --interface {{inputs.parameters.interface}}
+          --instances  {{inputs.parameters.instances}} \
+          --interface  {{inputs.parameters.interface}} \
+          --user-id    {{inputs.parameters.user-id}} \
+          --data-dir   /data/runs/{{workflow.name}} \
+          --shard-index {{inputs.parameters.shard-index}} \
+          --num-shards  {{workflow.parameters.num-users}}
 
-        # Persist logs alongside the captures so they survive across steps
-        cp data/progress.csv data/logs/ 2>/dev/null || mkdir -p data/logs && cp data/progress.csv data/logs/ || true
-        cp data/collection.log data/logs/ 2>/dev/null || true
-
-        echo "Data collection completed. Traces in /app/data/pcap/"
+        echo "Collector {{inputs.parameters.user-id}} complete. Data in /data/runs/{{workflow.name}}/{{inputs.parameters.user-id}}/"
 
       securityContext:
         runAsUser: 0
         capabilities:
           add: ["NET_RAW", "NET_ADMIN"]
       volumeMounts:
-      - name: data-storage
-        mountPath: /app/data
-      resources:
-        requests:
-          memory: 2Gi
-          cpu: 1
-        limits:
-          memory: 4Gi
-          cpu: 2
-
-  # Step 2: Processing → reads /app/data/pcap/, writes /app/data/pickle/
-  - name: process-pcaps
-    container:
-      image: "{{workflow.parameters.image}}"
-      command: ["/bin/bash"]
-      args:
-      - -c
-      - |
-        set -e
-        echo "Processing pcap files from /app/data/pcap/ ..."
-
-        .venv/bin/python process.py
-
-        echo "Processing complete. Pickles in /app/data/pickle/"
-
-      volumeMounts:
-      - name: data-storage
-        mountPath: /app/data
-      resources:
-        requests:
-          memory: 4Gi
-          cpu: 1
-        limits:
-          memory: 8Gi
-          cpu: 2
-
-  # Step 3: Analysis → reads /app/data/pickle/, writes /app/data/analysis/
-  - name: analyze-dataset
-    container:
-      image: "{{workflow.parameters.image}}"
-      command: ["/bin/bash"]
-      args:
-      - -c
-      - |
-        set -e
-        echo "Running EDA on /app/data/pickle/ ..."
-
-        .venv/bin/python analyze.py
-
-        echo "Analysis complete. Plots in /app/data/analysis/"
-
-      volumeMounts:
-      - name: data-storage
-        mountPath: /app/data
-      resources:
-        requests:
-          memory: 2Gi
-          cpu: 500m
-        limits:
-          memory: 4Gi
-          cpu: 1
-
-  # Step 4: Upload → mirrors all sub-paths to GCS
-  - name: upload-results
-    inputs:
-      parameters:
-      - name: gcs-bucket
-    container:
-      image: google/cloud-sdk:alpine
-      command: ["/bin/sh"]
-      args:
-      - -c
-      - |
-        set -e
-        BUCKET="{{inputs.parameters.gcs-bucket}}"
-        # Use workflow name + creation timestamp as a unique run prefix so
-        # every run lands in its own GCS directory and nothing is overwritten.
-        RUN_PREFIX="runs/{{workflow.name}}"
-        echo "Uploading results to gs://${BUCKET}/${RUN_PREFIX}/"
-
-        # Authentication is provided automatically via GKE Workload Identity
-        # bound to the argo-workflow Kubernetes SA — no key file required.
-
-        [ -d "/data/pcap" ]     && gsutil -m cp -r /data/pcap     gs://${BUCKET}/${RUN_PREFIX}/pcap     && echo "Uploaded pcap/"
-        [ -d "/data/pickle" ]   && gsutil -m cp -r /data/pickle   gs://${BUCKET}/${RUN_PREFIX}/pickle   && echo "Uploaded pickle/"
-        [ -d "/data/analysis" ] && gsutil -m cp -r /data/analysis gs://${BUCKET}/${RUN_PREFIX}/analysis && echo "Uploaded analysis/"
-        [ -d "/data/logs" ]     && gsutil -m cp -r /data/logs     gs://${BUCKET}/${RUN_PREFIX}/logs     && echo "Uploaded logs/"
-
-        echo "All uploads completed to gs://${BUCKET}/${RUN_PREFIX}/"
-
-      volumeMounts:
-      - name: data-storage
+      - name: node-data
         mountPath: /data
       resources:
         requests:
-          memory: 512Mi
-          cpu: 200m
+          memory: 2Gi
+          cpu: "1"
         limits:
-          memory: 1Gi
+          memory: 4Gi
+          cpu: "2"
+
+  # ── Step 2: processing pod ──────────────────────────────────────────────────
+  # Reads all user-NNN/pcap/ directories from hostPath (data already on disk).
+  # Writes pickles to /data/runs/<wf>/pickle/ then pushes only pickles to GCS.
+  - name: process-pcaps
+    inputs:
+      parameters:
+      - name: gcs-bucket
+      - name: gcs-prefix
+    container:
+      image: "{{workflow.parameters.image}}"
+      command: ["/bin/bash"]
+      args:
+      - -c
+      - |
+        set -e
+        DATA_DIR="/data/runs/{{workflow.name}}"
+        echo "=== Processing pod ==="
+        echo "Reading pcaps from ${DATA_DIR}/user-*/ ..."
+
+        .venv/bin/python process.py \
+          --data-dir   ${DATA_DIR} \
+          --gcs-bucket {{inputs.parameters.gcs-bucket}} \
+          --gcs-prefix {{inputs.parameters.gcs-prefix}}
+
+        echo "Processing complete. Pickles in ${DATA_DIR}/pickle/"
+
+      volumeMounts:
+      - name: node-data
+        mountPath: /data
+      resources:
+        requests:
+          memory: 4Gi
+          cpu: "1"
+        limits:
+          memory: 8Gi
+          cpu: "2"
+
+  # ── Step 3: analysis pod ────────────────────────────────────────────────────
+  # Reads pickles from hostPath (written by process pod, still on disk).
+  # Writes plots to /data/runs/<wf>/analysis/ then pushes to GCS.
+  - name: analyze-dataset
+    inputs:
+      parameters:
+      - name: gcs-bucket
+      - name: gcs-prefix
+    container:
+      image: "{{workflow.parameters.image}}"
+      command: ["/bin/bash"]
+      args:
+      - -c
+      - |
+        set -e
+        DATA_DIR="/data/runs/{{workflow.name}}"
+        echo "=== Analysis pod ==="
+        echo "Reading pickles from ${DATA_DIR}/pickle/ ..."
+
+        .venv/bin/python analyze.py \
+          --data-dir   ${DATA_DIR} \
+          --gcs-bucket {{inputs.parameters.gcs-bucket}} \
+          --gcs-prefix {{inputs.parameters.gcs-prefix}}
+
+        echo "Analysis complete. Plots in ${DATA_DIR}/analysis/"
+
+      volumeMounts:
+      - name: node-data
+        mountPath: /data
+      resources:
+        requests:
+          memory: 2Gi
           cpu: 500m
+        limits:
+          memory: 4Gi
+          cpu: "1"
 
 ---
 
@@ -252,3 +320,5 @@ spec:
         value: "90"
       - name: interface
         value: "eth0"
+      - name: num-users
+        value: "10"

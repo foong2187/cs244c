@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 # process.py - convert pcaps to direction sequences and split into train/val/test pickles
+#
+# In the parallel-collection pipeline, each collect pod writes its output to
+# GCS under  gs://<bucket>/<run-prefix>/<user-id>/pcap/  and
+#            gs://<bucket>/<run-prefix>/<user-id>/logs/
+#
+# This script (running as a single pod after all collect pods finish):
+#   1. Pulls every user's pcap/ and logs/ from GCS into the local data dir.
+#   2. Merges all progress.csv files to build the guard-IP map.
+#   3. Processes all pcaps (same site_idx from different users = same label).
+#   4. Writes pickles locally and then uploads them back to GCS.
 
+import argparse
 import csv
 import logging
 import pickle
@@ -11,13 +22,10 @@ from pathlib import Path
 
 import dpkt
 import numpy as np
+from google.cloud import storage as gcs
 from tqdm import tqdm
 
-PCAP_DIR      = Path(__file__).parent / "data" / "pcap"
-PROGRESS_FILE = Path(__file__).parent / "data" / "progress.csv"
 PICKLE_DIR    = Path(__file__).parent / "data" / "pickle"
-# Miro's training code expects files here:
-MIRO_DIR      = Path(__file__).parent.parent / "dataset" / "ClosedWorld" / "NoDef"
 SEQ_LEN       = 5000
 MIN_PACKETS   = 50     # discard traces shorter than this (failed page loads)
 SPLIT         = (0.80, 0.10, 0.10)  # train / val / test
@@ -29,6 +37,40 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data-dir", type=str, default=None,
+                   help="Local base data directory (default: <script_dir>/data).")
+    p.add_argument("--gcs-bucket", type=str, default=None,
+                   help="GCS bucket name (no gs:// prefix). When set, pcaps are "
+                        "pulled from GCS before processing and pickles are pushed "
+                        "back to GCS afterwards.")
+    p.add_argument("--gcs-prefix", type=str, default="",
+                   help="Run prefix inside the GCS bucket, e.g. "
+                        "'runs/wf-data-collection-pipeline-abc12'.")
+    return p.parse_args()
+
+
+def gcs_push(local_dir: Path, bucket_name: str, gcs_prefix: str):
+    """Upload all files under local_dir recursively to gs://<bucket_name>/<gcs_prefix>/."""
+    if not local_dir.exists() or not any(local_dir.rglob("*")):
+        log.warning(f"  Nothing to upload from {local_dir}")
+        return
+    client = gcs.Client()
+    bucket = client.bucket(bucket_name)
+    uploaded = 0
+    for local_file in sorted(local_dir.rglob("*")):
+        if not local_file.is_file():
+            continue
+        relative = local_file.relative_to(local_dir)
+        blob_name = f"{gcs_prefix.strip('/')}/{relative}"
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(str(local_file))
+        log.info(f"  Uploaded {local_file.name} → gs://{bucket_name}/{blob_name}")
+        uploaded += 1
+    log.info(f"Upload complete: {uploaded} file(s) → gs://{bucket_name}/{gcs_prefix.strip('/')}")
 
 
 
@@ -73,41 +115,47 @@ def pcap_to_sequence(pcap_path: Path, guard_ip: str) -> list[int] | None:
     return directions + [0] * (SEQ_LEN - len(directions))
 
 
-def load_guard_ip_map() -> dict[tuple[int, int], str]:
+def load_guard_ip_map(progress_files: list[Path]) -> dict[tuple[int, int, str], str]:
     """
-    Build a (site_idx, instance) -> guard_ip map from progress.csv.
-    Each pcap was captured on a specific guard; using the correct one
-    ensures accurate direction filtering even when the guard rotated.
+    Build a (site_idx, instance, user_id) -> guard_ip map from all progress.csv files.
+
+    The user_id is the name of the parent directory of the progress.csv file
+    (e.g. data/user-003/progress.csv → user_id = "user-003").
+    Including user_id in the key lets multiple users collect the same
+    (site_idx, instance) pair without collision.
     """
     guard_map = {}
-    if not PROGRESS_FILE.exists():
-        return guard_map
-    with open(PROGRESS_FILE, newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("status") != "ok":
-                continue
-            ip = row.get("guard_ip", "").strip()
-            if not ip:
-                continue
-            try:
-                key = (int(row["site_idx"]), int(row["instance"]))
-                guard_map[key] = ip
-            except (KeyError, ValueError):
-                continue
+    for progress_file in progress_files:
+        if not progress_file.exists():
+            continue
+        user_id = progress_file.parent.name  # e.g. "user-003"
+        with open(progress_file, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("status") != "ok":
+                    continue
+                ip = row.get("guard_ip", "").strip()
+                if not ip:
+                    continue
+                try:
+                    key = (int(row["site_idx"]), int(row["instance"]), user_id)
+                    guard_map[key] = ip
+                except (KeyError, ValueError):
+                    continue
     return guard_map
 
 
-def get_fallback_guard_ip() -> str | None:
-    """Return the most common guard IP from progress.csv as a fallback."""
-    if not PROGRESS_FILE.exists():
-        return None
+def get_fallback_guard_ip(progress_files: list[Path]) -> str | None:
+    """Return the most common guard IP across all progress.csv files."""
     from collections import Counter
     ips = []
-    with open(PROGRESS_FILE, newline="") as f:
-        for row in csv.DictReader(f):
-            ip = row.get("guard_ip", "").strip()
-            if ip:
-                ips.append(ip)
+    for progress_file in progress_files:
+        if not progress_file.exists():
+            continue
+        with open(progress_file, newline="") as f:
+            for row in csv.DictReader(f):
+                ip = row.get("guard_ip", "").strip()
+                if ip:
+                    ips.append(ip)
     if ips:
         return Counter(ips).most_common(1)[0][0]
     return None
@@ -115,16 +163,40 @@ def get_fallback_guard_ip() -> str | None:
 
 
 def main():
-    PICKLE_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
 
-    pcaps = sorted(PCAP_DIR.glob("*.pcap"))
-    if not pcaps:
-        log.error(f"No pcap files found in {PCAP_DIR}. Run collect.py first.")
-        sys.exit(1)
-    log.info(f"Found {len(pcaps)} pcap files")
+    base_dir = Path(args.data_dir) if args.data_dir else Path(__file__).parent / "data"
 
-    guard_map = load_guard_ip_map()
-    fallback_guard_ip = get_fallback_guard_ip()
+    # ── discover user directories ────────────────────────────────────────────
+    # Collect pods wrote to <base_dir>/user-NNN/pcap/ on the shared node disk.
+    # Data is already here — no GCS pull needed for raw pcaps.
+    user_dirs = sorted(
+        d for d in base_dir.iterdir()
+        if d.is_dir() and d.name.startswith("user-")
+    )
+    if not user_dirs:
+        # Fallback: legacy single-user layout (base_dir/pcap/*.pcap)
+        user_dirs_pcap = list(base_dir.glob("pcap/*.pcap"))
+        if user_dirs_pcap:
+            log.info("No user-NNN subdirectories found; using legacy single-user layout")
+            user_dirs = [base_dir]
+        else:
+            log.error(f"No user directories or pcap files found under {base_dir}.")
+            sys.exit(1)
+
+    log.info(f"Found {len(user_dirs)} user director(ies): "
+             f"{[d.name for d in user_dirs]}")
+
+    # ── collect all pcaps and build guard-IP map ─────────────────────────────
+    progress_files = []
+    for ud in user_dirs:
+        pf = ud / "logs" / "progress.csv"
+        if not pf.exists():
+            pf = ud / "progress.csv"   # legacy path
+        progress_files.append(pf)
+
+    guard_map = load_guard_ip_map(progress_files)
+    fallback_guard_ip = get_fallback_guard_ip(progress_files)
     if not guard_map and not fallback_guard_ip:
         fallback_guard_ip = input(
             "Enter Tor guard IP (check collection.log for 'guard IP: ...'): "
@@ -135,30 +207,49 @@ def main():
     else:
         log.info(f"No per-pcap guard map; using fallback IP: {fallback_guard_ip}")
 
-    # Filename format: {site_idx:03d}-{instance:03d}.pcap
-    by_site: dict[int, list[Path]] = defaultdict(list)
-    for p in pcaps:
-        try:
-            parts = p.stem.split("-")
-            site_idx = int(parts[0])
-            by_site[site_idx].append(p)
-        except ValueError:
-            log.warning(f"Skipping unexpected filename: {p.name}")
+    # ── gather all pcaps grouped by site_idx ─────────────────────────────────
+    # Key insight: pcaps from different users with the same site_idx
+    # are treated as independent instances of the SAME class.
+    # Filename: {site_idx:03d}-{instance:03d}.pcap  (unchanged)
+    by_site: dict[int, list[tuple[Path, str]]] = defaultdict(list)
 
-    log.info(f"Sites with data: {len(by_site)}")
+    for ud in user_dirs:
+        user_id = ud.name
+        pcap_dir = ud / "pcap"
+        if not pcap_dir.exists():
+            log.warning(f"  No pcap/ dir under {ud}, skipping")
+            continue
+        for p in sorted(pcap_dir.glob("*.pcap")):
+            try:
+                parts = p.stem.split("-")
+                site_idx = int(parts[0])
+                by_site[site_idx].append((p, user_id))
+            except ValueError:
+                log.warning(f"Skipping unexpected filename: {p.name}")
+
+    total_pcaps = sum(len(v) for v in by_site.values())
+    if total_pcaps == 0:
+        log.error("No pcap files found. Run collect.py first.")
+        sys.exit(1)
+    log.info(f"Found {total_pcaps} pcap files across {len(by_site)} site(s)")
+
+    # ── process ──────────────────────────────────────────────────────────────
+    global PICKLE_DIR
+    PICKLE_DIR = base_dir / "pickle"
+    PICKLE_DIR.mkdir(parents=True, exist_ok=True)
 
     X_all, y_all = [], []
     skipped = 0
 
     for site_idx in tqdm(sorted(by_site), desc="Processing sites"):
-        for pcap_path in by_site[site_idx]:
+        for (pcap_path, user_id) in by_site[site_idx]:
             try:
                 instance = int(pcap_path.stem.split("-")[1])
             except (IndexError, ValueError):
                 instance = -1
-            guard_ip = guard_map.get((site_idx, instance), fallback_guard_ip)
+            guard_ip = guard_map.get((site_idx, instance, user_id), fallback_guard_ip)
             if not guard_ip:
-                log.warning(f"  No guard IP for {pcap_path.name}, skipping")
+                log.warning(f"  No guard IP for {pcap_path.name} (user={user_id}), skipping")
                 skipped += 1
                 continue
             seq = pcap_to_sequence(pcap_path, guard_ip)
@@ -194,34 +285,19 @@ def main():
     n_val   = int(n * SPLIT[1])
 
     splits = {
-        "train": (X[:n_train],          y[:n_train]),
-        "valid": (X[n_train:n_train+n_val], y[n_train:n_train+n_val]),
-        "test":  (X[n_train+n_val:],    y[n_train+n_val:]),
+        "train": (X[:n_train],               y[:n_train]),
+        "valid": (X[n_train:n_train+n_val],  y[n_train:n_train+n_val]),
+        "test":  (X[n_train+n_val:],         y[n_train+n_val:]),
     }
 
-    # Save pickles in two places:
-    #   1. data/pickle/X_{split}_Fresh2026.pkl  — our own naming (concept drift)
-    #   2. dataset/ClosedWorld/NoDef/X_{split}_NoDef.pkl — Miro's expected path
-    MIRO_DIR.mkdir(parents=True, exist_ok=True)
-
     for split_name, (X_split, y_split) in splits.items():
-        # Our copy
         x_path = PICKLE_DIR / f"X_{split_name}_Fresh2026.pkl"
         y_path = PICKLE_DIR / f"y_{split_name}_Fresh2026.pkl"
         with open(x_path, "wb") as f:
             pickle.dump(X_split, f)
         with open(y_path, "wb") as f:
             pickle.dump(y_split, f)
-
-        # Miro's copy
-        mx_path = MIRO_DIR / f"X_{split_name}_NoDef.pkl"
-        my_path = MIRO_DIR / f"y_{split_name}_NoDef.pkl"
-        with open(mx_path, "wb") as f:
-            pickle.dump(X_split, f)
-        with open(my_path, "wb") as f:
-            pickle.dump(y_split, f)
-
-        log.info(f"  {split_name:5s}: {len(X_split):6d} traces  → {x_path.name} + {mx_path}")
+        log.info(f"  {split_name:5s}: {len(X_split):6d} traces  → {x_path}")
 
     log.info("")
     log.info("=== Dataset summary ===")
@@ -230,9 +306,16 @@ def main():
     log.info(f"  Sequence length    : {SEQ_LEN}")
     log.info(f"  Train / Val / Test : {n_train} / {n_val} / {n - n_train - n_val}")
     log.info(f"  Saved to           : {PICKLE_DIR}")
-    log.info("")
-    log.info("Next step: copy data/pickle/ to the src/ directory and run:")
-    log.info("  python src/train_closed_world.py --defense NoDef")
+
+    # ── push pickles back to GCS ─────────────────────────────────────────────
+    if args.gcs_bucket:
+        prefix = args.gcs_prefix.strip("/")
+        gcs_pickle_path = f"{prefix}/pickle" if prefix else "pickle"
+        gcs_push(PICKLE_DIR, args.gcs_bucket, gcs_pickle_path)
+        log.info("GCS upload complete.")
+    else:
+        log.info("")
+        log.info("Next step: run  .venv/bin/python analyze.py")
 
 
 if __name__ == "__main__":

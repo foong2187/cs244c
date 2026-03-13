@@ -1,4 +1,9 @@
-# Single StorageClass for all workflow data (pd-balanced via GKE CSI driver)
+# Storage configuration for WF data collection pipeline.
+#
+# The pipeline now uses emptyDir (node-local scratch) for all pods and GCS
+# as the sole durable store.  No PersistentVolume or PersistentVolumeClaim
+# is required.  The StorageClass is kept in case it is needed in future.
+
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -9,52 +14,6 @@ parameters:
   replication-type: none
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer
-
----
-
-# Single Persistent Volume backed by the GCE disk provisioned by Terraform.
-# DATA_DISK_NAME is substituted by deploy.sh from terraform output data_storage_disk_name.
-# Data is organised into sub-paths within the volume:
-#   pcap/       – raw tcpdump captures
-#   pickle/     – processed direction-sequence numpy arrays
-#   analysis/   – EDA plots and statistics
-#   logs/       – collection.log, progress.csv
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: data-storage-pv
-  labels:
-    purpose: wf-data-storage
-spec:
-  capacity:
-    storage: 500Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: wf-data-storage
-  csi:
-    driver: pd.csi.storage.gke.io
-    volumeHandle: wflab-cluster-data-storage
-    fsType: ext4
-
----
-
-# Single Persistent Volume Claim for all workflow data
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data-storage-pvc
-  namespace: argo
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 500Gi
-  storageClassName: wf-data-storage
-  selector:
-    matchLabels:
-      purpose: wf-data-storage
 
 ---
 

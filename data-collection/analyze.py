@@ -8,10 +8,15 @@ Loads the processed pickle files and checks:
   3. Direction     — outgoing/incoming ratio per site
   4. Outliers      — unusually short, long, or biased sites
 
-Run from data-collection/:
-    .venv/bin/python analyze.py
+In the parallel-collection pipeline this script runs as a single pod after
+process.py.  It pulls pickles from GCS, runs the analysis, and pushes the
+resulting plots back to GCS.
+
+Run locally:
+    .venv/bin/python analyze.py [--data-dir data] [--gcs-bucket NAME --gcs-prefix PREFIX]
 """
 
+import argparse
 import pickle
 import sys
 from pathlib import Path
@@ -20,18 +25,86 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")           # headless — saves PNGs instead of showing
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
+from google.cloud import storage as gcs
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data-dir", type=str, default=None,
+                   help="Local base data directory (default: <script_dir>/data).")
+    p.add_argument("--gcs-bucket", type=str, default=None,
+                   help="GCS bucket name (no gs:// prefix). When set, pickles "
+                        "are pulled from GCS before analysis and plots are pushed "
+                        "back to GCS afterwards.")
+    p.add_argument("--gcs-prefix", type=str, default="",
+                   help="Run prefix inside the GCS bucket, e.g. "
+                        "'runs/wf-data-collection-pipeline-abc12'.")
+    return p.parse_args()
+
+
+def gcs_pull(bucket_name: str, gcs_prefix: str, local_dest: Path):
+    """Download all blobs under gcs_prefix into local_dest/."""
+    local_dest.mkdir(parents=True, exist_ok=True)
+    client = gcs.Client()
+    prefix = gcs_prefix.strip("/") + "/"
+    blobs = list(client.list_blobs(bucket_name, prefix=prefix))
+    if not blobs:
+        raise RuntimeError(f"No objects found at gs://{bucket_name}/{prefix}")
+    print(f"Pulling {len(blobs)} file(s) from gs://{bucket_name}/{prefix} → {local_dest}/")
+    for blob in blobs:
+        relative = blob.name[len(prefix):]
+        if not relative:
+            continue
+        dest_file = local_dest / relative
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(dest_file))
+        print(f"  Downloaded {relative}")
+
+
+def gcs_push(local_dir: Path, bucket_name: str, gcs_prefix: str):
+    """Upload all files under local_dir recursively to gs://<bucket_name>/<gcs_prefix>/."""
+    if not local_dir.exists() or not any(local_dir.rglob("*")):
+        print(f"  [warn] Nothing to upload from {local_dir}")
+        return
+    client = gcs.Client()
+    bucket = client.bucket(bucket_name)
+    uploaded = 0
+    for local_file in sorted(local_dir.rglob("*")):
+        if not local_file.is_file():
+            continue
+        relative = local_file.relative_to(local_dir)
+        blob_name = f"{gcs_prefix.strip('/')}/{relative}"
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(str(local_file))
+        print(f"  Uploaded {local_file.name} → gs://{bucket_name}/{blob_name}")
+        uploaded += 1
+    print(f"Upload complete: {uploaded} file(s) → gs://{bucket_name}/{gcs_prefix.strip('/')}")
+
+
+args = parse_args()
+
+base_dir = Path(args.data_dir) if args.data_dir else Path(__file__).parent / "data"
+
+# ── pull pickles from GCS ────────────────────────────────────────────────────
+# analyze.py is decoupled from the process pod: it always fetches pickles from
+# GCS rather than relying on shared node disk, so it can run anywhere.
+if args.gcs_bucket:
+    prefix = args.gcs_prefix.strip("/")
+    gcs_pickle = f"{prefix}/pickle" if prefix else "pickle"
+    gcs_pull(args.gcs_bucket, gcs_pickle, base_dir / "pickle")
+else:
+    print("No --gcs-bucket provided; expecting pickles already at "
+          f"{Path(args.data_dir or 'data') / 'pickle'}")
 
 # ── paths ────────────────────────────────────────────────────────────────────
-PICKLE_DIR  = Path(__file__).parent / "data" / "pickle"
+PICKLE_DIR  = base_dir / "pickle"
 SITES_FILE  = Path(__file__).parent / "sites.txt"
-OUT_DIR     = Path(__file__).parent / "data" / "analysis"
+OUT_DIR     = base_dir / "analysis"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEQ_LEN = 5000
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 def load(split):
     xp = PICKLE_DIR / f"X_{split}_Fresh2026.pkl"
     yp = PICKLE_DIR / f"y_{split}_Fresh2026.pkl"
@@ -285,3 +358,10 @@ print(f"  Avg trace length       : {site_mean_len.mean():.0f} packets")
 print(f"  Avg outgoing ratio     : {site_out_ratio.mean()*100:.1f}%")
 print(f"\n  Plots saved to: {OUT_DIR}")
 print()
+
+# ── push analysis results to GCS if requested ────────────────────────────────
+if args.gcs_bucket:
+    prefix = args.gcs_prefix.strip("/")
+    gcs_analysis = f"{prefix}/analysis" if prefix else "analysis"
+    gcs_push(OUT_DIR, args.gcs_bucket, gcs_analysis)
+

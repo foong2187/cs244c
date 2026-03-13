@@ -28,33 +28,21 @@ variable "node_pool_name" {
 }
 
 variable "machine_type" {
-  description = "Machine type for GKE nodes"
+  description = "Machine type for the single GKE node. Must have enough CPU/RAM for all parallel collector pods. With 10 pods each requesting 2 CPU / 4 Gi, you need at least 20 vCPU / 40 Gi — e2-standard-32 (32 vCPU / 128 Gi) gives comfortable headroom."
   type        = string
-  default     = "e2-standard-4"
+  default     = "e2-standard-32"
 }
 
 variable "disk_size_gb" {
-  description = "Disk size for GKE nodes in GB"
+  description = "Node-local disk size in GB. All collector pods share this single node's disk via emptyDir. With 10 users each capturing ~2 GB of pcaps, 400 GB gives ample headroom for pcaps, pickles, and analysis outputs coexisting during processing steps."
   type        = number
-  default     = 100
+  default     = 400
 }
 
-variable "min_node_count" {
-  description = "Minimum number of nodes in the node pool"
+variable "node_count" {
+  description = "Fixed number of nodes. Set to 1 — all parallelism comes from multiple pods on the same node, not from multiple nodes."
   type        = number
   default     = 1
-}
-
-variable "max_node_count" {
-  description = "Maximum number of nodes in the node pool"
-  type        = number
-  default     = 5
-}
-
-variable "initial_node_count" {
-  description = "Initial number of nodes in the node pool"
-  type        = number
-  default     = 2
 }
 
 variable "gcs_bucket_name" {
