@@ -91,11 +91,9 @@ deploy_infrastructure() {
     PROJECT_ID=$(terraform output -raw project_id)
     GCS_BUCKET=$(terraform output -raw gcs_bucket_name)
     ARGO_SA_EMAIL=$(terraform output -raw argo_service_account_email)
-    DATA_DISK_NAME=$(terraform output -raw data_storage_disk_name)
 
     log_info "Cluster: $CLUSTER_NAME in $CLUSTER_LOCATION"
     log_info "GCS Bucket: $GCS_BUCKET"
-    log_info "Data disk: $DATA_DISK_NAME"
 }
 
 # Configure kubectl
@@ -124,7 +122,6 @@ deploy_k8s_resources() {
     sed -i.bak \
         -e "s|\${GCS_BUCKET}|${GCS_BUCKET}|g" \
         -e "s|\${PROJECT_ID}|${PROJECT_ID}|g" \
-        -e "s|\${DATA_DISK_NAME}|${DATA_DISK_NAME}|g" \
         k8s-manifests/storage.yaml
 
     # Apply Kubernetes manifests

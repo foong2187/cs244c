@@ -29,7 +29,9 @@ log_error() {
 # Default parameters
 INSTANCES=90
 INTERFACE="eth0"
+NUM_USERS=10
 WORKFLOW_NAME=""
+ARGO_INSTANCE_ID="argo-workflows-controller"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --interface)
             INTERFACE="$2"
+            shift 2
+            ;;
+        -u|--num-users)
+            NUM_USERS="$2"
             shift 2
             ;;
         -n|--name)
@@ -58,6 +64,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -i, --instances NUM    Number of instances per site (default: 90)"
+            echo "  -u, --num-users NUM    Number of parallel collector pods (default: 10)"
             echo "  --interface IFACE      Network interface (default: eth0)"
             echo "  -n, --name NAME        Workflow name (for logs, delete, status commands)"
             echo "  -h, --help             Show this help message"
@@ -82,10 +89,13 @@ COMMAND="${COMMAND:-submit}"
 # Check if argo CLI is available
 if ! command -v argo &> /dev/null; then
     log_error "argo CLI not found. Please install it first:"
-    log_error "curl -sLO https://github.com/argoproj/argo-workflows/releases/latest/download/argo-linux-amd64.gz"
-    log_error "gunzip argo-linux-amd64.gz"
-    log_error "chmod +x argo-linux-amd64"
-    log_error "sudo mv argo-linux-amd64 /usr/local/bin/argo"
+    _OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    _ARCH=$(uname -m); [ "$_ARCH" = "x86_64" ] && _ARCH="amd64" || _ARCH="arm64"
+    log_error "  curl -sLO https://github.com/argoproj/argo-workflows/releases/latest/download/argo-${_OS}-${_ARCH}.gz"
+    log_error "  gunzip argo-${_OS}-${_ARCH}.gz"
+    log_error "  chmod +x argo-${_OS}-${_ARCH}"
+    log_error "  sudo mv argo-${_OS}-${_ARCH} /usr/local/bin/argo"
+    log_error "Or on macOS: brew install argo"
     exit 1
 fi
 
@@ -105,8 +115,10 @@ case "$COMMAND" in
         WORKFLOW_RESULT=$(argo submit \
             --from workflowtemplate/wf-data-collection-pipeline \
             -n argo \
+            --instanceid "$ARGO_INSTANCE_ID" \
             --parameter instances="$INSTANCES" \
             --parameter interface="$INTERFACE" \
+            --parameter num-users="$NUM_USERS" \
             --generate-name="wf-collection-" \
             -o name)
 
@@ -119,7 +131,7 @@ case "$COMMAND" in
         
     "list")
         log_info "Listing workflows..."
-        argo list -n argo
+        argo list -n argo --instanceid "$ARGO_INSTANCE_ID"
         ;;
         
     "logs")
@@ -128,7 +140,7 @@ case "$COMMAND" in
             exit 1
         fi
         log_info "Getting logs for workflow: $WORKFLOW_NAME"
-        argo logs "$WORKFLOW_NAME" -n argo -f
+        argo logs "$WORKFLOW_NAME" -n argo --instanceid "$ARGO_INSTANCE_ID" -f
         ;;
         
     "status")
@@ -137,7 +149,7 @@ case "$COMMAND" in
             exit 1
         fi
         log_info "Getting status for workflow: $WORKFLOW_NAME"
-        argo get "$WORKFLOW_NAME" -n argo
+        argo get "$WORKFLOW_NAME" -n argo --instanceid "$ARGO_INSTANCE_ID"
         ;;
         
     "delete")
@@ -146,7 +158,7 @@ case "$COMMAND" in
             exit 1
         fi
         log_warning "Deleting workflow: $WORKFLOW_NAME"
-        argo delete "$WORKFLOW_NAME" -n argo
+        argo delete "$WORKFLOW_NAME" -n argo --instanceid "$ARGO_INSTANCE_ID"
         log_success "Workflow deleted"
         ;;
         
