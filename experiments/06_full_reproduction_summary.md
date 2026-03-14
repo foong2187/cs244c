@@ -28,7 +28,7 @@ Key methodological details from the paper (Section 4):
 
 Pre-split DF-format pickles provided to us:
 
-- `dataset/ClosedWorld/{NoDef, BRO, BuFLO, RegulaTor, Tamaraw, WalkieTalkie}/`
+- `dataset/ClosedWorld/{NoDef, BRO, BuFLO, RegulaTor, Tamaraw, WalkieTalkie, WTFPAD}/`
 - `dataset/OpenWorld/{NoDef, BRO, BuFLO, RegulaTor, Tamaraw}/`
 
 **NoDef closed-world stats:**
@@ -61,6 +61,25 @@ We built a crawler (`crawler/`) that:
 - Local: 27,320 pcap files
 - GCP: 64,635 pcap files
 - Total: **91,955 pcap files**
+
+**Cell-level dataset (after reprocessing — see Section 3):**
+
+| Split | Samples |
+|-------|--------:|
+| Train | 72,270 |
+| Valid | 9,033 |
+| Test | 9,035 |
+| **Total** | **90,338** |
+
+- **Classes:** 95 (Alexa Top 100 minus 5 sites with insufficient data)
+- **Per-class train samples:** min=476, max=1,048, mean=761, median=772
+- **Direction ratio:** 28.8% outgoing / 71.2% incoming (cell-level approximation)
+- **Non-zero trace length:** min=50, median=1,135, mean=2,017, p90=5,000
+- **Truncated at 5,000:** 22.8% of training traces
+
+**Closed-world DFNet accuracy on cell-level data:**
+- **Test accuracy: 0.480** (95 classes)
+- Per-class accuracy: mean=0.471, min=0.022, max=0.832
 
 ---
 
@@ -126,6 +145,7 @@ We trained DFNet on each defense variant using the curated benchmark data.
 | Defense | Test Accuracy | Notes |
 |---------|-------------:|-------|
 | NoDef | **0.961** | Comparable to paper's ~98% |
+| WTF-PAD | **0.895** | Lightweight adaptive padding; moderate degradation |
 | RegulaTor | **0.818** | Still fairly learnable |
 | BRO | **0.741** | Moderate defense |
 | WalkieTalkie | **0.461** (top-1) / **0.737** (top-2) | Decoy mechanism visible in top-2 |
@@ -307,17 +327,52 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 
 ---
 
-## 11) Conclusions for the Paper
+## 11) Paper-Ready: Datasets and Methodology Subsection
 
-### 11.1 Positive Findings
+The following is written in a style suitable for inclusion in the paper's methodology section.
+
+---
+
+### Datasets
+
+We evaluate DFNet on two categories of data: (1) curated benchmark datasets that follow the original DF paper's format, and (2) a self-collected dataset of Tor traffic gathered in March 2026.
+
+**Benchmark datasets.** We use pre-processed direction-sequence pickles for seven defense configurations: NoDef (undefended), WTF-PAD, RegulaTor, BRO, WalkieTalkie, BuFLO, and Tamaraw. For each defense, the closed-world dataset contains 100 monitored websites with 80 training / 10 validation / 10 test traces per site (8,000 / 1,000 / 1,000 samples). Open-world datasets are available for NoDef, BRO, BuFLO, RegulaTor, and Tamaraw. All traces use Tor cell-level direction sequences of length 5,000 (+1 outgoing, -1 incoming, 0 padding).
+
+**Self-collected dataset.** We independently collected Tor entry-guard traffic for the same Alexa Top-100 site list used in the DF paper. Data was gathered from two machines: a local workstation (WSL2 on Windows, 15 parallel Tor instances, visit indices 0–349) and a Google Cloud VM (e2-standard-16 in us-central1, 30 parallel Tor instances, visit indices 650–999). Each worker runs an independent Tor process with its own SOCKS and control port. Headless Firefox (driven by Selenium) loads each site through the Tor SOCKS proxy while `tcpdump` captures traffic to/from the entry guard. After collection, we reprocessed all 91,955 raw pcap files using a cell-level extraction method: for each TCP packet with non-zero payload directed to or from the guard IP, we emit `ceil(payload / 512)` direction events to approximate Tor's 512-byte cell granularity (see Section 3). Traces shorter than 50 cells are discarded.
+
+The resulting dataset contains **90,338 traces across 95 classes** (5 sites from the original 100 were dropped due to insufficient data). We split 80/10/10 into 72,270 train / 9,033 validation / 9,035 test samples. Per-class training counts range from 476 to 1,048 (mean 761). The median non-zero trace length is 1,135 cells; 22.8% of traces are truncated at the 5,000 cap.
+
+### Model and Training
+
+We use the DFNet architecture from Sirinam et al.: four 1D convolutional blocks (filter counts 32, 64, 128, 256; kernel sizes 8, 8, 8, 8; ELU activation in block 1, ReLU in blocks 2–4; each block has two Conv1D layers, BatchNorm, MaxPool with pool size 8/8/8/4, and Dropout 0.1) followed by two fully connected layers (512 units each, ReLU, Dropout 0.7 and 0.5) and a softmax output. We use Adamax (lr = 0.002, β₁ = 0.9, β₂ = 0.999) with batch size 128 and train for 30 epochs. For self-collected data experiments, we also apply EarlyStopping (patience 7 on val_loss), ReduceLROnPlateau (factor 0.5, patience 3), and ModelCheckpoint (best val_accuracy). All training is performed on an NVIDIA RTX 3080 GPU.
+
+### Key Differences Between Datasets
+
+| Property | Benchmark | Self-collected |
+|----------|-----------|----------------|
+| Collection period | ~2016–2018 | March 2026 |
+| Collection tool | `tor-browser-crawler` | Custom Selenium + tcpdump |
+| Machines | 10 campus machines | 2 (WSL2 + GCE VM) |
+| Representation | Native Tor cells | Approximated from TCP payload |
+| Direction ratio (out/in) | 15.5% / 84.5% | 28.8% / 71.2% |
+| Median trace length | 4,022 | 1,135 |
+| Traces per class | 1,000 | 476–1,048 (mean 761) |
+| Truncated at 5,000 | 41.6% | 22.8% |
+
+---
+
+## 12) Conclusions for the Paper
+
+### 12.1 Positive Findings
 
 1. **Paper results are reproducible on curated benchmark data.** DFNet achieves 96.1% closed-world accuracy on the provided NoDef pickles, consistent with published ~98%.
 
 2. **Our independently crawled data contains real WF signal.** 48% accuracy on 95 classes (cell-level) is 45x above random chance (1.05%). On a focused 30-class subset with longer traces, accuracy reaches 60%.
 
-3. **Defense effectiveness ordering matches the literature.** NoDef > RegulaTor > BRO > WalkieTalkie > BuFLO > Tamaraw — the relative ranking is consistent.
+3. **Defense effectiveness ordering matches the literature.** NoDef > WTF-PAD > RegulaTor > BRO > WalkieTalkie > BuFLO > Tamaraw — the relative ranking is consistent with the paper's findings.
 
-### 11.2 Negative / Critical Findings
+### 12.2 Negative / Critical Findings
 
 4. **Critical representation bug discovered.** All three independent crawling efforts (ours, Yousef's, Devin's) captured TCP packets instead of Tor cells. This produced a fundamentally different data representation that reduced accuracy by ~12 percentage points. The paper does not clearly specify that inputs should be at the cell level vs packet level.
 
@@ -325,7 +380,7 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 
 6. **Large accuracy gap persists after fixing the bug.** Even with cell-level representation, our best 95-class accuracy is 48% vs the benchmark's 96%. The remaining 48pp gap comes from temporal distribution shift, shorter traces, different collection environments, and the cell-counting approximation.
 
-### 11.3 Implications
+### 12.3 Implications
 
 - The paper's ~98% accuracy likely depends on **controlled collection conditions** that don't reflect real-world Tor traffic diversity.
 - The **practical threat** of deep fingerprinting attacks may be lower than benchmark numbers suggest, especially against traffic collected across different time periods and network environments.
@@ -333,7 +388,7 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 
 ---
 
-## 12) Training History Data
+## 13) Training History Data
 
 Full per-epoch training metrics for cross-dataset experiments are saved in:
 - `experiments/cross_dataset_training_history.csv` (benchmark → crawled)
