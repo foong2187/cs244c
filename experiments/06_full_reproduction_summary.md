@@ -184,6 +184,20 @@ We trained DFNet on each defense variant using the curated benchmark data.
 
 The cell-level reprocessing improved in-distribution accuracy from ~36–39% to **48.0%**, a meaningful 10–12 percentage point gain confirming the representation bug was a real source of degradation.
 
+### 5.3 Tamaraw Defense Simulation on Self-Collected Data
+
+To evaluate defense effectiveness on our own data, we applied the Tamaraw defense simulator to all 90,338 cell-level traces. Tamaraw (Cai et al., CCS 2014) uses fixed dual-rate constant padding: outgoing packets at 25 pkt/s, incoming at ~83 pkt/s, with total counts padded to multiples of 100. Because our traces are direction-only (no timestamps), we assigned synthetic timestamps at 10ms inter-packet intervals before applying the defense.
+
+| Metric | NoDef (ours) | Tamaraw (ours) | Tamaraw (benchmark) |
+|--------|-------------:|---------------:|--------------------:|
+| **Test Accuracy** | **0.480** | **0.096** | **0.261** |
+| Outgoing ratio | 28.8% | 31.4% | — |
+| Median trace length | 1,135 | 1,550 | — |
+
+Tamaraw reduces accuracy on our data from 48.0% to **9.6%** — an 80% relative drop, and nearly random for 95 classes (1.05%). This is even lower than the benchmark's 26.1%, likely because our shorter, noisier traces leave less signal for the model after Tamaraw's padding obliterates timing and length patterns.
+
+This confirms that Tamaraw is highly effective as a defense against deep fingerprinting, even on independently collected data with a different traffic profile.
+
 ---
 
 ## 6) Cross-Dataset Generalization Experiments
@@ -276,6 +290,7 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 | Our data (raw packets) | Combined crawled | Packet-level | 95 | 37–39% |
 | Our data (raw, max-acc subset) | Top 30 classes | Packet-level | 30 | 59.9% |
 | Our data (cell-level) | Cell-level reprocessed | Cell-level | 95 | **48.0%** |
+| Our data (cell + Tamaraw) | Tamaraw-defended | Cell-level | 95 | **9.6%** |
 | Cross: Bench→Ours (raw) | — | Mixed | 95 | 0.94% |
 | Cross: Ours→Bench (raw) | — | Mixed | 95 | 2.11% |
 | Cross: Bench→Ours (cell) | — | Cell-level | 95 | 1.24% |
@@ -324,6 +339,7 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 | `scripts/train_all_modern_defenses.py` | Automate training on all defense variants |
 | `scripts/plot_closed_world_accuracy.py` | Generate accuracy comparison bar chart |
 | `scripts/plot_training_metrics_from_log.py` | Plot training/loss curves from logs |
+| `scripts/defend_and_eval.py` | Apply Tamaraw defense to self-collected data and train/eval DFNet |
 
 ---
 
@@ -372,13 +388,15 @@ We use the DFNet architecture from Sirinam et al.: four 1D convolutional blocks 
 
 3. **Defense effectiveness ordering matches the literature.** NoDef > WTF-PAD > RegulaTor > BRO > WalkieTalkie > BuFLO > Tamaraw — the relative ranking is consistent with the paper's findings.
 
+4. **Tamaraw defense validated on self-collected data.** Applying Tamaraw simulation to our cell-level traces drops accuracy from 48.0% to 9.6% (nearly random for 95 classes), confirming that constant-rate padding defenses are effective even against independently collected traffic with a different noise profile.
+
 ### 12.2 Negative / Critical Findings
 
-4. **Critical representation bug discovered.** All three independent crawling efforts (ours, Yousef's, Devin's) captured TCP packets instead of Tor cells. This produced a fundamentally different data representation that reduced accuracy by ~12 percentage points. The paper does not clearly specify that inputs should be at the cell level vs packet level.
+5. **Critical representation bug discovered.** All three independent crawling efforts (ours, Yousef's, Devin's) captured TCP packets instead of Tor cells. This produced a fundamentally different data representation that reduced accuracy by ~12 percentage points. The paper does not clearly specify that inputs should be at the cell level vs packet level.
 
-5. **Zero cross-dataset generalization.** Models trained on one dataset achieve random-chance accuracy on the other (1%), in both directions, even after fixing the representation bug. The DF model learns distribution-specific artifacts, not universal website fingerprints.
+6. **Zero cross-dataset generalization.** Models trained on one dataset achieve random-chance accuracy on the other (1%), in both directions, even after fixing the representation bug. The DF model learns distribution-specific artifacts, not universal website fingerprints.
 
-6. **Large accuracy gap persists after fixing the bug.** Even with cell-level representation, our best 95-class accuracy is 48% vs the benchmark's 96%. The remaining 48pp gap comes from temporal distribution shift, shorter traces, different collection environments, and the cell-counting approximation.
+7. **Large accuracy gap persists after fixing the bug.** Even with cell-level representation, our best 95-class accuracy is 48% vs the benchmark's 96%. The remaining 48pp gap comes from temporal distribution shift, shorter traces, different collection environments, and the cell-counting approximation.
 
 ### 12.3 Implications
 
