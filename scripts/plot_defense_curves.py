@@ -160,7 +160,12 @@ def make_plots():
     ax_loss.set_title("Training Loss", fontsize=12, fontweight="medium", pad=8)
     ax_loss.set_xlabel("Epoch", fontsize=10)
     ax_loss.set_ylabel("Cross-Entropy Loss", fontsize=10)
-    ax_loss.set_ylim(0, 2.0)
+    all_losses = []
+    for h in histories.values():
+        all_losses.extend(h["val_loss"])
+        all_losses.extend(h["loss"])
+    loss_cap = min(max(all_losses) * 1.05, 5.5)
+    ax_loss.set_ylim(0, loss_cap)
     ax_loss.set_xlim(1, EPOCHS)
     ax_loss.legend(fontsize=8, frameon=True, fancybox=False, edgecolor="#cccccc",
                    framealpha=0.95, loc="upper right")

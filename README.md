@@ -1,171 +1,201 @@
-# Deep Fingerprinting (DF) - Website Fingerprinting with Deep Learning
+# Deep Fingerprinting — CCS'18 Reproduction
 
-Reimplementation of the Deep Fingerprinting attack from:
+Reproduction and evaluation of the Deep Fingerprinting (DF) attack from:
 
-> Sirinam, P., Imani, M., Juarez, M., & Wright, M. (2018).
-> **Deep Fingerprinting: Undermining Website Fingerprinting Defenses with Deep Learning.**
-> In CCS '18. https://doi.org/10.1145/3243734.3243768
+> Sirinam et al. **"Deep Fingerprinting: Undermining Website Fingerprinting Defenses with Deep Learning."** CCS '18. https://doi.org/10.1145/3243734.3243768
 
-## Overview
+We reproduce the paper's results on curated benchmark data, collect our own Tor traffic, and evaluate the impact of traffic analysis defenses on independently gathered traces.
 
-The DF model is a 1D Convolutional Neural Network (CNN) designed for website fingerprinting attacks against Tor. It takes sequences of packet directions (+1 outgoing, -1 incoming) as input and classifies them into website classes.
+---
 
-Key architecture features:
-- 4 convolutional blocks with increasing filter counts (32, 64, 128, 256)
-- ELU activation in Block 1 (handles negative input values), ReLU in Blocks 2-4
-- Batch Normalization and Dropout for regularization
-- 2 fully-connected layers (512 units each) for classification
-- Softmax output layer
+## Key Results
+
+### Benchmark Data (closed-world, 100 classes)
+
+| Defense | Test Accuracy | Paper |
+|---------|-------------:|------:|
+| NoDef | **96.1%** | ~98% |
+| WTF-PAD | **89.5%** | — |
+| RegulaTor | **81.8%** | — |
+| BRO | **74.1%** | — |
+| WalkieTalkie | **46.1%** (top-1) / **73.7%** (top-2) | — |
+| BuFLO | **31.7%** | — |
+| Tamaraw | **26.1%** | — |
+
+### Self-Collected Data (closed-world, 95 classes, March 2026)
+
+| Dataset | Test Accuracy |
+|---------|-------------:|
+| NoDef (cell-level) | **48.0%** |
+| Tamaraw-defended | **9.6%** |
+
+Cross-dataset generalization (train on one, test on the other) consistently yields ~1% accuracy — random chance — confirming the DF model learns environment-specific patterns rather than universal fingerprints.
+
+---
+
+## Model Architecture
+
+DFNet is a 1D CNN trained on direction-only sequences (+1 outgoing, −1 incoming, 0 padding), fixed length 5,000.
+
+- 4 Conv1D blocks: 32 → 64 → 128 → 256 filters, kernel size 8, ELU (block 1) / ReLU (blocks 2–4)
+- BatchNorm + MaxPool + Dropout (0.1) per block
+- 2 FC layers: 512 units each, Dropout 0.7 / 0.5
+- Softmax output
+- Optimizer: Adamax (lr=0.002), batch size 128, 30 epochs
+
+---
 
 ## Setup
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Requires Python 3.8+ and TensorFlow 2.10+.
+Requires Python 3.10+, TensorFlow 2.15+, CUDA-capable GPU recommended.
 
-## Dataset
+---
 
-### GTT23 (recommended)
+## Datasets
 
-**[GTT23: A 2023 Dataset of Genuine Tor Traces](https://zenodo.org/records/10620520)** on Zenodo (DOI: [10.5281/zenodo.10620520](https://doi.org/10.5281/zenodo.10620520)) provides network metadata of encrypted traffic from Tor exit relays, suitable for website fingerprinting. Access may require signing in to Zenodo and accepting the record’s terms; download the `GTT23.hdf5` file and `README.md` from the record page.
+### Benchmark Pickles
 
-#### Downloading
-
-```bash
-cd data
-bash download.sh
-```
-
-The HDF5 file is ~44 GB and may require multiple retries (the script handles resume).
-
-#### Preprocessing GTT23 into pickle files
-
-Use the included preprocessing script to convert the HDF5 data into the pickle format expected by the training scripts:
-
-```bash
-cd src
-
-# Closed-world only (95 classes, default)
-python preprocess_gtt23.py --hdf5 ../data/GTT23.hdf5
-
-# Closed-world + open-world splits
-python preprocess_gtt23.py --hdf5 ../data/GTT23.hdf5 --open_world
-
-# Filter to HTTPS traffic, require at least 200 samples per class
-python preprocess_gtt23.py --hdf5 ../data/GTT23.hdf5 --port 443 --min_samples 200
-```
-
-The script selects labels with the most circuits, extracts cell direction sequences, flips the sign convention to match the paper (+1=outgoing, -1=incoming), and splits into train/valid/test sets.
-
-System HDF5 dependencies: `apt install libhdf5-mpi-dev h5utils hdf5-helpers hdf5-tools`
-
-### Original paper dataset (often unavailable)
-
-The CCS’18 paper’s authors originally hosted closed-world and open-world data on Google Drive; those links are frequently broken. For reference, see the [deep-fingerprinting/df](https://github.com/deep-fingerprinting/df) repo. You can run and test **without** any real dataset using synthetic data (see “Testing Without Datasets” below).
-
-### Expected layout and format (for our scripts)
-
-After you have data in the right form, place the pickle files as follows:
+Pre-processed DF-format pickles for 7 defense configurations. Place them as:
 
 ```
 dataset/
   ClosedWorld/
-    NoDef/          # X_train_NoDef.pkl, y_train_NoDef.pkl, etc.
-    WTFPAD/         # X_train_WTFPAD.pkl, y_train_WTFPAD.pkl, etc.
-    WalkieTalkie/   # X_train_WalkieTalkie.pkl, etc.
-  OpenWorld/
-    NoDef/          # Training + Mon/Unmon test splits
+    NoDef/         # X_train_NoDef.pkl, y_train_NoDef.pkl, X_valid_*, y_valid_*, X_test_*, y_test_*
     WTFPAD/
+    RegulaTor/
+    BRO/
+    BuFLO/
+    Tamaraw/
     WalkieTalkie/
+  OpenWorld/
+    NoDef/
+    RegulaTor/
+    BRO/
+    BuFLO/
+    Tamaraw/
 ```
 
-Each pickle file should contain:
-- `X_*.pkl`: Arrays of shape `(n, 5000)` with packet direction sequences
-- `y_*.pkl`: Arrays of shape `(n,)` with website class labels
+Each `X_*.pkl` has shape `(n, 5000)` with values in `{−1, 0, +1}`. Each `y_*.pkl` has shape `(n,)` with integer class labels.
+
+### Self-Collected Dataset
+
+We crawled Tor traffic for the Alexa Top-100 sites from two machines:
+- **Local** (WSL2, RTX 3080): 15 parallel Tor instances
+- **GCP** (e2-standard-16, us-central1): 30 parallel Tor instances
+
+Raw pcaps (91,955 files) were reprocessed to approximate Tor cell-level sequences: for each TCP packet with non-zero payload to/from the guard IP, emit `ceil(payload_bytes / 512)` direction events. See `scripts/reprocess_cell_level.py`.
+
+Final dataset: **90,338 traces, 95 classes**, split 80/10/10.
+
+---
 
 ## Usage
 
-### Closed-World Evaluation
-
-Train and evaluate on non-defended Tor traffic (95 sites, 30 epochs):
+### Train on benchmark (closed-world)
 
 ```bash
 cd src
 python train_closed_world.py --defense NoDef
-```
-
-Train on WTF-PAD defended traffic (40 epochs):
-
-```bash
+python train_closed_world.py --defense Tamaraw
 python train_closed_world.py --defense WTFPAD --epochs 40
-```
-
-Train on Walkie-Talkie traffic with top-2 accuracy:
-
-```bash
 python train_closed_world.py --defense WalkieTalkie --top_n 2
 ```
 
-### Open-World Evaluation
+### Train on benchmark (open-world)
 
 ```bash
 python train_open_world.py --defense NoDef
-python train_open_world.py --defense WTFPAD --epochs 40
+python train_open_world.py --defense Tamaraw
 ```
 
-### Testing Without Datasets
+### Train on self-collected data
 
-Use synthetic data to verify the architecture works:
+```bash
+# After running scripts/reprocess_cell_level.py to produce pickles in /path/to/cell-level/
+python src/train_combined.py --data_dir /path/to/cell-level --epochs 50
+```
+
+### Apply Tamaraw defense to self-collected data and evaluate
+
+```bash
+python scripts/defend_and_eval.py
+```
+
+### Generate defense training curves figure
+
+```bash
+# Train all defenses and save per-epoch histories (runs ~15 min on GPU):
+python scripts/plot_defense_curves.py
+
+# Regenerate figure from saved CSVs only:
+python scripts/plot_defense_curves.py --plot-only
+```
+
+### Test without real data
 
 ```bash
 python train_closed_world.py --synthetic --epochs 5
 python train_open_world.py --synthetic --epochs 5
 ```
 
-### Model Summary
+---
 
-View the model architecture:
+## Figures
 
-```bash
-python model.py
-```
+| Figure | Description |
+|--------|-------------|
+| `experiments/fig_defense_training_curves.png` | Training loss + validation accuracy curves for all 5 benchmark defenses |
+| `experiments/fig_closed_world_accuracy_ours_vs_modern.png` | Bar chart: benchmark vs self-collected closed-world accuracy |
+| `experiments/fig_training_curve_crawled95.png` | Accuracy over epochs for 95-class self-collected data |
+| `experiments/fig_loss_curve_crawled95.png` | Loss over epochs for 95-class self-collected data |
 
-## Hyperparameters (Table 1 from paper)
+![Defense training curves](experiments/fig_defense_training_curves.png)
 
-| Parameter | Value |
-|-----------|-------|
-| Input Dimension | 5000 |
-| Optimizer | Adamax |
-| Learning Rate | 0.002 |
-| Epochs (NoDef/W-T) | 30 |
-| Epochs (WTF-PAD) | 40 |
-| Batch Size | 128 |
-| Filter Sizes | [32, 64, 128, 256] |
-| Kernel Size | 8 |
-| Pool Size | 8 |
-| Pool Stride | 4 |
-| FC Hidden Units | [512, 512] |
-| Dropout (pools) | 0.1 |
-| Dropout (FC1, FC2) | 0.7, 0.5 |
+---
 
 ## Project Structure
 
 ```
 src/
-  model.py               # DFNet CNN architecture
-  data_utils.py           # Data loading, preprocessing, synthetic generation
-  preprocess_gtt23.py     # Convert GTT23 HDF5 -> pickle files for training
-  train_closed_world.py   # Closed-world training and evaluation
-  train_open_world.py     # Open-world training and evaluation
-  evaluate.py             # Evaluation metrics and plotting utilities
-data/
-  download.sh             # Download GTT23 from Zenodo
-dataset/                  # Preprocessed pickle files (generated by preprocess_gtt23.py)
-saved_models/             # Trained models saved here
-results/                  # Evaluation results (CSV)
+  model.py                      # DFNet architecture
+  data_utils.py                 # Data loading and preprocessing
+  train_closed_world.py         # Closed-world train + eval
+  train_open_world.py           # Open-world train + eval
+  train_combined.py             # Train on self-collected combined dataset
+  combine_datasets.py           # Combine raw pcaps into DF-format pickles
+  evaluate.py                   # Metrics and plotting utilities
+scripts/
+  reprocess_cell_level.py       # Reprocess pcaps to cell-level sequences (the key fix)
+  defend_and_eval.py            # Apply Tamaraw simulation to self-collected data
+  plot_defense_curves.py        # Generate training curve figures
+  filter_resplit_combined.py    # Filter, cap, and stratified-split datasets
+  cross_dataset_eval.py         # Benchmark → crawled cross-dataset evaluation
+  cross_dataset_eval_reverse.py # Crawled → benchmark cross-dataset evaluation
+crawler/
+  crawl.py                      # Single-worker Tor crawler
+  crawl_parallel.py             # Multi-worker parallel crawler
+  capture.py                    # pcap capture and sequence extraction
+dataset/                        # Benchmark pickle files (not committed)
+experiments/                    # Results, figures, and per-epoch history CSVs
 ```
+
+---
+
+## Detailed Findings
+
+See [`experiments/06_full_reproduction_summary.md`](experiments/06_full_reproduction_summary.md) for a full write-up covering:
+- The packet-level vs. cell-level representation bug we discovered (affected all 3 independent crawlers)
+- Cross-dataset generalization experiments
+- Analysis of why the 48pp accuracy gap between benchmark and self-collected data persists
+- Paper-ready dataset and methodology description
+
+---
 
 ## Reference
 
