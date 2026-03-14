@@ -318,6 +318,12 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 | Loss curve (max-acc) | `experiments/fig_loss_curve_maxacc.png` | Loss over epochs, 30-class max-accuracy subset |
 | Training curve (95-class) | `experiments/fig_training_curve_crawled95.png` | Accuracy over epochs, full 95-class crawled |
 | Loss curve (95-class) | `experiments/fig_loss_curve_crawled95.png` | Loss over epochs, full 95-class crawled |
+| Defense training curves | `experiments/fig_defense_training_curves.png` | Side-by-side loss + accuracy curves for NoDef, RegulaTor, BRO, BuFLO, Tamaraw (faint=train, bold=val) |
+
+Per-defense per-epoch training histories (loss, accuracy, val_loss, val_accuracy) are saved as CSVs in `experiments/defense_histories/`:
+- `NoDef.csv`, `RegulaTor.csv`, `BRO.csv`, `BuFLO.csv`, `Tamaraw.csv`
+
+These can be used to regenerate the figure without retraining via `scripts/plot_defense_curves.py --plot-only`.
 
 ---
 
@@ -340,6 +346,7 @@ The cross-dataset results (1% accuracy both directions) strongly suggest that DF
 | `scripts/plot_closed_world_accuracy.py` | Generate accuracy comparison bar chart |
 | `scripts/plot_training_metrics_from_log.py` | Plot training/loss curves from logs |
 | `scripts/defend_and_eval.py` | Apply Tamaraw defense to self-collected data and train/eval DFNet |
+| `scripts/plot_defense_curves.py` | Train all benchmark defenses, save per-epoch histories, and plot training curves |
 
 ---
 
