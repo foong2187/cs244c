@@ -19,7 +19,9 @@ Usage:
 import argparse
 import logging
 import pickle
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 from tqdm import tqdm
 
-from defenses import bro, regulator, tamaraw, buflo
+from defenses import bro, regulator, tamaraw, buflo, wtfpad
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,41 @@ SUFFIX_MAP = {
     "regulator": "RegulaTor",
     "tamaraw": "Tamaraw",
     "buflo": "BuFLO",
+    "wtfpad": "WTFPAD",
 }
+
+
+def process_partition_wtfpad(files: list, labels: list, desc: str) -> tuple:
+    """Apply WTF-PAD to a partition by batching all traces through simulate_directory."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_in = Path(tmpdir) / "input"
+        tmp_out = Path(tmpdir) / "output"
+        tmp_in.mkdir()
+
+        # Copy traces to temp dir with sequential names to preserve order
+        for i, f in enumerate(files):
+            shutil.copy(f, tmp_in / str(i))
+
+        logger.info(f"  {desc}: running WTF-PAD on {len(files)} traces...")
+        ok = wtfpad.simulate_directory(tmp_in, tmp_out)
+        if not ok:
+            raise RuntimeError(f"WTF-PAD simulation failed for partition {desc}")
+
+        X_list, y_list = [], []
+        for i, lab in enumerate(labels):
+            out_file = tmp_out / str(i)
+            if not out_file.exists():
+                continue
+            trace = load_trace(out_file)
+            if not trace:
+                continue
+            dirs = trace_to_directions(trace)
+            if (dirs != 0).sum() < MIN_PACKETS:
+                continue
+            X_list.append(dirs)
+            y_list.append(lab)
+
+        return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.int64)
 
 
 def main():
@@ -100,7 +136,7 @@ def main():
     parser.add_argument("--output-base", type=str, required=True,
                         help="Base output dir (each defense gets a subdir)")
     parser.add_argument("--defenses", nargs="+", required=True,
-                        choices=["nodef", "bro", "regulator", "tamaraw", "buflo"])
+                        choices=["nodef", "bro", "regulator", "tamaraw", "buflo", "wtfpad"])
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -228,31 +264,48 @@ def main():
             return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.int64)
 
         # Training: monitored + unmonitored combined
-        X_mon_train, y_mon_train = process_files(
-            mon_train_files, mon_train_labels, "train-mon")
-        X_unmon_train, y_unmon_train = process_unmon(
-            unmon_train_files, "train-unmon")
+        if defense_name == "wtfpad":
+            X_mon_train, y_mon_train = process_partition_wtfpad(
+                mon_train_files, mon_train_labels, "train-mon")
+            X_unmon_train, y_unmon_train = process_partition_wtfpad(
+                unmon_train_files, [UNMON_LABEL] * len(unmon_train_files), "train-unmon")
+        else:
+            X_mon_train, y_mon_train = process_files(
+                mon_train_files, mon_train_labels, "train-mon")
+            X_unmon_train, y_unmon_train = process_unmon(
+                unmon_train_files, "train-unmon")
         X_train = np.concatenate([X_mon_train, X_unmon_train])
         y_train = np.concatenate([y_mon_train, y_unmon_train])
-        # Shuffle
         idx = rng.permutation(len(X_train))
         X_train, y_train = X_train[idx], y_train[idx]
 
         # Validation: monitored + unmonitored combined
-        X_mon_valid, y_mon_valid = process_files(
-            mon_valid_files, mon_valid_labels, "valid-mon")
-        X_unmon_valid, y_unmon_valid = process_unmon(
-            unmon_valid_files, "valid-unmon")
+        if defense_name == "wtfpad":
+            X_mon_valid, y_mon_valid = process_partition_wtfpad(
+                mon_valid_files, mon_valid_labels, "valid-mon")
+            X_unmon_valid, y_unmon_valid = process_partition_wtfpad(
+                unmon_valid_files, [UNMON_LABEL] * len(unmon_valid_files), "valid-unmon")
+        else:
+            X_mon_valid, y_mon_valid = process_files(
+                mon_valid_files, mon_valid_labels, "valid-mon")
+            X_unmon_valid, y_unmon_valid = process_unmon(
+                unmon_valid_files, "valid-unmon")
         X_valid = np.concatenate([X_mon_valid, X_unmon_valid])
         y_valid = np.concatenate([y_mon_valid, y_unmon_valid])
         idx = rng.permutation(len(X_valid))
         X_valid, y_valid = X_valid[idx], y_valid[idx]
 
         # Test: separate monitored and unmonitored
-        X_test_Mon, y_test_Mon = process_files(
-            mon_test_files, mon_test_labels, "test-mon")
-        X_test_Unmon, y_test_Unmon = process_unmon(
-            unmon_test_files, "test-unmon")
+        if defense_name == "wtfpad":
+            X_test_Mon, y_test_Mon = process_partition_wtfpad(
+                mon_test_files, mon_test_labels, "test-mon")
+            X_test_Unmon, y_test_Unmon = process_partition_wtfpad(
+                unmon_test_files, [UNMON_LABEL] * len(unmon_test_files), "test-unmon")
+        else:
+            X_test_Mon, y_test_Mon = process_files(
+                mon_test_files, mon_test_labels, "test-mon")
+            X_test_Unmon, y_test_Unmon = process_unmon(
+                unmon_test_files, "test-unmon")
 
         # Save
         def save(name, arr):
